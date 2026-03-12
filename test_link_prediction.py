@@ -1,5 +1,11 @@
 import argparse
+from muon import MuonWithAuxAdam
+import torch.distributed as dist
 
+
+dist.get_world_size = lambda *args, **kwargs: 1
+dist.get_rank = lambda *args, **kwargs: 0
+dist.all_gather = lambda *args, **kwargs: None
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -10,6 +16,8 @@ from torch_geometric.nn import GCNConv, SAGEConv
 from torch_geometric.data.data import Data, DataEdgeAttr, DataTensorAttr
 from torch_geometric.data.storage import GlobalStorage, NodeStorage, EdgeStorage
 
+import warnings 
+warnings.filterwarnings("ignore")
 torch.serialization.add_safe_globals([
     Data,
     DataEdgeAttr,
@@ -134,6 +142,7 @@ def train(model, predictor, data, split_edge, optimizer, batch_size):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         torch.nn.utils.clip_grad_norm_(predictor.parameters(), 1.0)
 
+        
         optimizer.step()
 
         num_examples = pos_out.size(0)
@@ -225,6 +234,13 @@ def main():
     parser.add_argument('--runs', type=int, default=10)
     args = parser.parse_args()
     print(args)
+    if not dist.is_initialized():
+        dist.init_process_group(
+            backend="gloo",
+            init_method="tcp://127.0.0.1:29500",
+            rank=0,
+            world_size=1
+        )
 
     device = f'cuda:{args.device}' if torch.cuda.is_available() else 'cpu'
     device = torch.device(device)
@@ -270,9 +286,33 @@ def main():
     for run in range(args.runs):
         model.reset_parameters()
         predictor.reset_parameters()
-        optimizer = torch.optim.Adam(
-            list(model.parameters()) + list(predictor.parameters()),
-            lr=args.lr)
+        # optimizer = torch.optim.Adam(
+        #     list(model.parameters()) + list(predictor.parameters()),
+        #     lr=args.lr)
+
+        all_params = list(model.parameters()) + list(predictor.parameters())
+
+        hidden_weights = [p for p in all_params if p.ndim >= 2]
+        hidden_gains_biases = [p for p in all_params if p.ndim < 2]
+
+        param_groups = [
+            dict(
+                params=hidden_weights,
+                use_muon=True,
+                lr=0.01,
+                weight_decay=5e-4
+            ),
+            dict(
+                params=hidden_gains_biases,
+                use_muon=False,
+                lr=3e-4,
+                betas=(0.9, 0.95),
+                weight_decay=5e-4
+            ),
+        ]
+
+        optimizer = MuonWithAuxAdam(param_groups)
+
 
         for epoch in range(1, 1 + args.epochs):
             loss = train(model, predictor, data, split_edge, optimizer,
