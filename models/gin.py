@@ -17,10 +17,10 @@ class GIN(torch.nn.Module):
 
         self.dropout = dropout
 
-    def forward(self, x, adj_t):
+    def forward(self, x, edge_index):
         for conv in self.convs[:-1]:
-            x = conv(x, adj_t)
+            x = conv(x, edge_index)
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
-        x = self.convs[-1](x, adj_t)
+        x = self.convs[-1](x, edge_index)
         return x

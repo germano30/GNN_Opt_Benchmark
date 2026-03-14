@@ -3,7 +3,6 @@ import time
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torch_sparse import SparseTensor
 import torch_geometric.transforms as T
 from torch_geometric.datasets import Planetoid
 
@@ -21,6 +20,17 @@ from muon import MuonWithAuxAdam
 # Assume other optimizers
 # from shampoo import Shampoo
 # from soap import SOAP
+from torch_geometric.data.data import Data, DataEdgeAttr, DataTensorAttr
+from torch_geometric.data.storage import GlobalStorage, NodeStorage, EdgeStorage
+
+torch.serialization.add_safe_globals([
+    Data,
+    DataEdgeAttr,
+    DataTensorAttr,
+    GlobalStorage,
+    NodeStorage,
+    EdgeStorage
+])
 
 class LinkPredictor(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers, dropout):
@@ -121,8 +131,7 @@ def train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, g
         edge_type = data.edge_attr.to(device)
         h = gnn(x, edge_index, edge_type)
     else:
-        adj_t = SparseTensor.from_edge_index(edge_index, sparse_sizes=(data.num_nodes, data.num_nodes)).t().to(device)
-        h = gnn(x, adj_t)
+        h = gnn(x, edge_index)
     
     pos_train_edge = split_edge['train']['edge'].to(device)
     neg_train_edge = split_edge['train']['edge_neg'].to(device)
@@ -148,8 +157,7 @@ def eval_link_prediction(gnn, predictor, data, split_edge, evaluator, device, gr
         edge_type = data.edge_attr.to(device)
         h = gnn(x, edge_index, edge_type)
     else:
-        adj_t = SparseTensor.from_edge_index(edge_index, sparse_sizes=(data.num_nodes, data.num_nodes)).t().to(device)
-        h = gnn(x, adj_t)
+        h = gnn(x, edge_index)
     
     pos_test_edge = split_edge['test']['edge'].to(device)
     neg_test_edge = split_edge['test']['edge_neg'].to(device)
@@ -157,10 +165,7 @@ def eval_link_prediction(gnn, predictor, data, split_edge, evaluator, device, gr
     pos_out = predictor(h[pos_test_edge[:, 0]], h[pos_test_edge[:, 1]])
     neg_out = predictor(h[neg_test_edge[:, 0]], h[neg_test_edge[:, 1]])
     
-    y_pred_pos = torch.cat([pos_out, neg_out], dim=0)
-    y_pred_neg = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)], dim=0)
-    
-    result = evaluator.eval({'y_pred_pos': y_pred_pos, 'y_pred_neg': y_pred_neg})
+    result = evaluator.eval({'y_pred_pos': pos_out, 'y_pred_neg': neg_out})
     return result['hits@20']  # Assuming
 
 def train_node_classification(model, data, split_idx, optimizer, device, graph_type):
@@ -175,8 +180,7 @@ def train_node_classification(model, data, split_idx, optimizer, device, graph_t
         edge_type = data.edge_attr.to(device)
         out = model(x, edge_index, edge_type)
     else:
-        adj_t = SparseTensor.from_edge_index(edge_index, sparse_sizes=(data.num_nodes, data.num_nodes)).t().to(device)
-        out = model(x, adj_t)
+        out = model(x, edge_index)
     
     loss = F.cross_entropy(out[split_idx['train']], y[split_idx['train']])
     loss.backward()
@@ -194,8 +198,7 @@ def eval_node_classification(model, data, split_idx, evaluator, device, graph_ty
         edge_type = data.edge_attr.to(device)
         out = model(x, edge_index, edge_type)
     else:
-        adj_t = SparseTensor.from_edge_index(edge_index, sparse_sizes=(data.num_nodes, data.num_nodes)).t().to(device)
-        out = model(x, adj_t)
+        out = model(x, edge_index)
     
     pred = out.argmax(dim=1)
     if evaluator:
