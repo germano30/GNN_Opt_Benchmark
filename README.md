@@ -97,6 +97,7 @@ Os experimentos serão conduzidos nos seguintes datasets:
 |-------|------|------|
 | ogbl-collab | grafo de colaboração | link prediction |
 | ogbn-proteins | grafo de proteínas | node classification |
+| ogbg-ppa | grafo de proteínas | graph classification |
 | Cora | rede de citações | node classification |
 | WordNet18RR | knowledge graph | link prediction |
 | OGB-BioKG | knowledge graph biológico | link prediction |
