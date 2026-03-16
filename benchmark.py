@@ -6,6 +6,16 @@ from torch.utils.data import DataLoader
 import torch_geometric.transforms as T
 from torch_geometric.datasets import Planetoid
 
+import warnings
+import numpy as np
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=np.exceptions.VisibleDeprecationWarning)
+warnings.filterwarnings(
+    "ignore",
+    message="pkg_resources is deprecated"
+)
+
 from models.gat import GAT
 from models.gcn import GCN
 from models.rgat import RGAT
@@ -120,10 +130,9 @@ def get_model(name, in_channels, hidden_channels, out_channels, num_layers, drop
         elif name == 'RGAT':
             return RGAT(in_channels, hidden_channels, out_channels, num_layers, dropout, num_relations)
 
-def train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, graph_type):
+def train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, graph_type, batch_size=1024):
     gnn.train()
     predictor.train()
-    optimizer.zero_grad()
     
     x = data.x.to(device)
     edge_index = data.edge_index.to(device)
@@ -133,19 +142,31 @@ def train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, g
     else:
         h = gnn(x, edge_index)
     
-    pos_train_edge = split_edge['train']['edge'].to(device)
-    neg_train_edge = split_edge['train']['edge_neg'].to(device)
+    pos_train_edge = split_edge['train']['edge']
+    neg_train_edge = split_edge['train']['edge_neg']
     
-    pos_out = predictor(h[pos_train_edge[:, 0]], h[pos_train_edge[:, 1]])
-    neg_out = predictor(h[neg_train_edge[:, 0]], h[neg_train_edge[:, 1]])
+    # Combine positive and negative edges
+    all_edges = torch.cat([pos_train_edge, neg_train_edge], dim=0)
+    labels = torch.cat([torch.ones(pos_train_edge.size(0)), torch.zeros(neg_train_edge.size(0))], dim=0)
     
-    pos_loss = -torch.log(pos_out + 1e-15).mean()
-    neg_loss = -torch.log(1 - neg_out + 1e-15).mean()
-    loss = pos_loss + neg_loss
+    # Create dataset and dataloader
+    dataset = torch.utils.data.TensorDataset(all_edges, labels)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     
-    loss.backward()
-    optimizer.step()
-    return loss.item()
+    total_loss = 0.0
+    for batch_edges, batch_labels in dataloader:
+        optimizer.zero_grad()
+        batch_edges = batch_edges.to(device)
+        batch_labels = batch_labels.to(device)
+        
+        out = predictor(h[batch_edges[:, 0]], h[batch_edges[:, 1]])
+        loss = F.binary_cross_entropy(out.squeeze(), batch_labels.float())
+        
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    
+    return total_loss / len(dataloader)
 
 def eval_link_prediction(gnn, predictor, data, split_edge, evaluator, device, graph_type):
     gnn.eval()
@@ -168,9 +189,8 @@ def eval_link_prediction(gnn, predictor, data, split_edge, evaluator, device, gr
     result = evaluator.eval({'y_pred_pos': pos_out, 'y_pred_neg': neg_out})
     return result['hits@20']  # Assuming
 
-def train_node_classification(model, data, split_idx, optimizer, device, graph_type):
+def train_node_classification(model, data, split_idx, optimizer, device, graph_type, batch_size=1024):
     model.train()
-    optimizer.zero_grad()
     
     x = data.x.to(device)
     edge_index = data.edge_index.to(device)
@@ -182,10 +202,24 @@ def train_node_classification(model, data, split_idx, optimizer, device, graph_t
     else:
         out = model(x, edge_index)
     
-    loss = F.cross_entropy(out[split_idx['train']], y[split_idx['train']])
-    loss.backward()
-    optimizer.step()
-    return loss.item()
+    train_indices = split_idx['train']
+    dataset = torch.utils.data.TensorDataset(train_indices, y[train_indices])
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    
+    total_loss = 0.0
+    for batch_indices, batch_labels in dataloader:
+        optimizer.zero_grad()
+        batch_indices = batch_indices.to(device)
+        batch_labels = batch_labels.to(device)
+        
+        batch_out = out[batch_indices]
+        loss = F.cross_entropy(batch_out, batch_labels)
+        
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    
+    return total_loss / len(dataloader)
 
 def eval_node_classification(model, data, split_idx, evaluator, device, graph_type):
     model.eval()
@@ -217,7 +251,7 @@ def eval_graph_classification(model, dataset, split_idx, evaluator, device):
     # Placeholder
     return 0.0
 
-def run_experiment(dataset_name, model_name, optimizer_name, epochs=10, lr=0.01, hidden_channels=256, num_layers=3, dropout=0.5):
+def run_experiment(dataset_name, model_name, optimizer_name, epochs=10, lr=0.01, hidden_channels=256, num_layers=3, dropout=0.5, batch_size=1024):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     data_info = load_dataset(dataset_name)
@@ -253,9 +287,9 @@ def run_experiment(dataset_name, model_name, optimizer_name, epochs=10, lr=0.01,
     start_time = time.time()
     for epoch in range(epochs):
         if task == 'link':
-            loss = train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, graph_type)
+            loss = train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, graph_type, batch_size)
         elif task == 'node':
-            loss = train_node_classification(model, data, split_idx, optimizer, device, graph_type)
+            loss = train_node_classification(model, data, split_idx, optimizer, device, graph_type, batch_size)
         print(f'Epoch {epoch}: Loss {loss:.4f}')
     training_time = time.time() - start_time
     
@@ -274,6 +308,7 @@ if __name__ == '__main__':
     parser.add_argument('--optimizer', type=str, required=True, choices=OPTIMIZERS)
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--lr', type=float, default=0.01)
+    parser.add_argument('--batch_size', type=int, default=1024)
     args = parser.parse_args()
     
     # Check model
@@ -282,5 +317,5 @@ if __name__ == '__main__':
     if DATASETS[args.dataset]['graph_type'] == 'heterogeneous' and args.model not in MODELS_HETERO:
         raise ValueError("Invalid model for heterogeneous graph")
     
-    score, time_taken = run_experiment(args.dataset, args.model, args.optimizer, args.epochs, args.lr)
+    score, time_taken = run_experiment(args.dataset, args.model, args.optimizer, args.epochs, args.lr, batch_size=args.batch_size)
     print(f'Dataset: {args.dataset}, Model: {args.model}, Optimizer: {args.optimizer}, Score: {score:.4f}, Time: {time_taken:.2f}s')
