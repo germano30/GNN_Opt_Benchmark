@@ -9,11 +9,11 @@ class GIN(torch.nn.Module):
         super(GIN, self).__init__()
 
         self.convs = torch.nn.ModuleList()
-        self.convs.append(GINConv(in_channels, hidden_channels, cached=True))
+        self.convs.append(GINConv(in_channels, hidden_channels))
         for _ in range(num_layers - 2):
             self.convs.append(
-                GINConv(hidden_channels, hidden_channels, cached=True))
-        self.convs.append(GINConv(hidden_channels, out_channels, cached=True))
+                GINConv(hidden_channels, hidden_channels))
+        self.convs.append(GINConv(hidden_channels, out_channels))
 
         self.dropout = dropout
 

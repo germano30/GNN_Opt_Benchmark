@@ -5,6 +5,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torch_geometric.transforms as T
 from torch_geometric.datasets import Planetoid
+from torch_geometric.utils import negative_sampling
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn import global_mean_pool
 
 import warnings
 import numpy as np
@@ -27,20 +30,50 @@ from ogb.nodeproppred import PygNodePropPredDataset, Evaluator as NodeEvaluator
 from ogb.graphproppred import PygGraphPropPredDataset, Evaluator as GraphEvaluator
 
 from muon import MuonWithAuxAdam
-# Assume other optimizers
-# from shampoo import Shampoo
-# from soap import SOAP
+try:
+    from preconditioned_stochastic_gradient_descent import PSGD # usually SOAP is implemented here or via another package
+except ImportError:
+    pass
+
+try:
+    import torch_optimizer as optim
+except ImportError:
+    pass
+
 from torch_geometric.data.data import Data, DataEdgeAttr, DataTensorAttr
 from torch_geometric.data.storage import GlobalStorage, NodeStorage, EdgeStorage
 
-torch.serialization.add_safe_globals([
-    Data,
-    DataEdgeAttr,
-    DataTensorAttr,
-    GlobalStorage,
-    NodeStorage,
-    EdgeStorage
-])
+try:
+    torch.serialization.safe_globals([
+        Data,
+        DataEdgeAttr,
+        DataTensorAttr,
+        GlobalStorage,
+        NodeStorage,
+        EdgeStorage
+    ])
+except AttributeError:
+    pass
+
+import torch
+import numpy as np
+import random
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+set_seed(42)
+
+_original_load = torch.load
+
+def custom_load(*args, **kwargs):
+    kwargs.setdefault('weights_only', False)
+    return _original_load(*args, **kwargs)
+
+torch.load = custom_load
 
 class LinkPredictor(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers, dropout):
@@ -65,6 +98,51 @@ class LinkPredictor(torch.nn.Module):
         x = self.lins[-1](x)
         return torch.sigmoid(x)
 
+
+class GraphPredictor(torch.nn.Module):
+    def __init__(self, hidden_channels, out_channels, num_layers, dropout):
+        super(GraphPredictor, self).__init__()
+        self.lins = torch.nn.ModuleList()
+        self.lins.append(torch.nn.Linear(hidden_channels, hidden_channels))
+        for _ in range(num_layers - 2):
+            self.lins.append(torch.nn.Linear(hidden_channels, hidden_channels))
+        self.lins.append(torch.nn.Linear(hidden_channels, out_channels))
+        self.dropout = dropout
+
+    def reset_parameters(self):
+        for lin in self.lins:
+            lin.reset_parameters()
+
+    def forward(self, x):
+        for lin in self.lins[:-1]:
+            x = lin(x)
+            x = F.relu(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.lins[-1](x)
+        return x
+
+class NodePredictor(torch.nn.Module):
+    def __init__(self, hidden_channels, out_channels, num_layers, dropout):
+        super(NodePredictor, self).__init__()
+        self.lins = torch.nn.ModuleList()
+        self.lins.append(torch.nn.Linear(hidden_channels, hidden_channels))
+        for _ in range(num_layers - 2):
+            self.lins.append(torch.nn.Linear(hidden_channels, hidden_channels))
+        self.lins.append(torch.nn.Linear(hidden_channels, out_channels))
+        self.dropout = dropout
+
+    def reset_parameters(self):
+        for lin in self.lins:
+            lin.reset_parameters()
+
+    def forward(self, x):
+        for lin in self.lins[:-1]:
+            x = lin(x)
+            x = F.relu(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.lins[-1](x)
+        return x
+
 # Placeholder for optimizers
 def get_optimizer(name, params, lr):
     if name == 'AdamW':
@@ -73,7 +151,19 @@ def get_optimizer(name, params, lr):
         return torch.optim.SGD(params, lr=lr)
     elif name == 'Muon':
         return MuonWithAuxAdam(params, lr=lr)
-    # Add others
+    elif name == 'Shampoo':
+        try:
+            import torch_optimizer as optim
+            return optim.Shampoo(params, lr=lr)
+        except ImportError:
+            raise ImportError("Please install torch_optimizer for Shampoo: pip install torch-optimizer")
+    elif name == 'SOAP':
+        try:
+            from soap import SOAP
+            return SOAP(params, lr=lr)
+        except ImportError:
+            # Another common source is via optimizer package or bitsandbytes, we'll assume a local 'soap.py' or package 'soap'
+            raise ImportError("Please ensure SOAP optimizer is available (e.g. from soap import SOAP)")
     else:
         raise ValueError(f"Unknown optimizer {name}")
 
@@ -84,7 +174,7 @@ DATASETS = {
     'ogbg-ppa': {'type': 'graph', 'graph_type': 'homogeneous'},
     'Cora': {'type': 'node', 'graph_type': 'homogeneous'},
     'WordNet18RR': {'type': 'link', 'graph_type': 'heterogeneous'},
-    'OGB-BioKG': {'type': 'link', 'graph_type': 'heterogeneous'},
+    'ogbl-biokg': {'type': 'link', 'graph_type': 'heterogeneous'},
 }
 
 MODELS_HOMO = ['GCN', 'GAT', 'GIN']
@@ -102,8 +192,8 @@ def load_dataset(name):
         dataset = PygLinkPropPredDataset(name=name)
         evaluator = LinkEvaluator(name=name)
         data = dataset[0]
-        split_edge = dataset.get_edge_split()
-        return data, split_edge, evaluator, 'link'
+        split_idx = dataset.get_edge_split()
+        return data, split_idx, evaluator, 'link'
     elif DATASETS[name]['type'] == 'node':
         dataset = PygNodePropPredDataset(name=name)
         evaluator = NodeEvaluator(name=name)
@@ -143,7 +233,17 @@ def train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, g
         h = gnn(x, edge_index)
     
     pos_train_edge = split_edge['train']['edge']
-    neg_train_edge = split_edge['train']['edge_neg']
+    
+    if 'edge_neg' in split_edge['train']:
+        neg_train_edge = split_edge['train']['edge_neg']
+    else:
+        # Dynamically generate negative edges
+        neg_edge_index = negative_sampling(
+            edge_index=pos_train_edge.t(), # (2, num_edges)
+            num_nodes=data.num_nodes,
+            num_neg_samples=pos_train_edge.size(0)
+        )
+        neg_train_edge = neg_edge_index.t()
     
     # Combine positive and negative edges
     all_edges = torch.cat([pos_train_edge, neg_train_edge], dim=0)
@@ -189,8 +289,9 @@ def eval_link_prediction(gnn, predictor, data, split_edge, evaluator, device, gr
     result = evaluator.eval({'y_pred_pos': pos_out, 'y_pred_neg': neg_out})
     return result['hits@20']  # Assuming
 
-def train_node_classification(model, data, split_idx, optimizer, device, graph_type, batch_size=1024):
-    model.train()
+def train_node_classification(gnn, predictor, data, split_idx, optimizer, device, graph_type, batch_size=1024):
+    gnn.train()
+    predictor.train()
     
     x = data.x.to(device)
     edge_index = data.edge_index.to(device)
@@ -198,11 +299,16 @@ def train_node_classification(model, data, split_idx, optimizer, device, graph_t
     
     if graph_type == 'heterogeneous':
         edge_type = data.edge_attr.to(device)
-        out = model(x, edge_index, edge_type)
+        h = gnn(x, edge_index, edge_type)
     else:
-        out = model(x, edge_index)
+        h = gnn(x, edge_index)
+    
+    out = predictor(h)
     
     train_indices = split_idx['train']
+    if train_indices.dtype == torch.bool:
+        train_indices = train_indices.nonzero(as_tuple=True)[0]
+        
     dataset = torch.utils.data.TensorDataset(train_indices, y[train_indices])
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     
@@ -221,8 +327,9 @@ def train_node_classification(model, data, split_idx, optimizer, device, graph_t
     
     return total_loss / len(dataloader)
 
-def eval_node_classification(model, data, split_idx, evaluator, device, graph_type):
-    model.eval()
+def eval_node_classification(gnn, predictor, data, split_idx, evaluator, device, graph_type):
+    gnn.eval()
+    predictor.eval()
     
     x = data.x.to(device)
     edge_index = data.edge_index.to(device)
@@ -230,26 +337,87 @@ def eval_node_classification(model, data, split_idx, evaluator, device, graph_ty
     
     if graph_type == 'heterogeneous':
         edge_type = data.edge_attr.to(device)
-        out = model(x, edge_index, edge_type)
+        h = gnn(x, edge_index, edge_type)
     else:
-        out = model(x, edge_index)
+        h = gnn(x, edge_index)
+        
+    out = predictor(h)
     
     pred = out.argmax(dim=1)
+    test_indices = split_idx['test']
+    if test_indices.dtype == torch.bool:
+        test_indices = test_indices.nonzero(as_tuple=True)[0]
+        
     if evaluator:
-        result = evaluator.eval({'y_true': y[split_idx['test']], 'y_pred': pred[split_idx['test']]})
+        result = evaluator.eval({'y_true': y[test_indices].unsqueeze(-1), 'y_pred': pred[test_indices].unsqueeze(-1)})
         return result['acc']
     else:
-        correct = (pred[split_idx['test']] == y[split_idx['test']]).sum().item()
-        return correct / split_idx['test'].sum().item()
+        correct = (pred[test_indices] == y[test_indices]).sum().item()
+        return correct / test_indices.numel()
 
-# Placeholder for graph classification
-def train_graph_classification(model, dataset, split_idx, optimizer, device):
-    # Placeholder
-    return 0.0
+# Graph classification
+def train_graph_classification(gnn, predictor, dataset, split_idx, optimizer, device, graph_type, batch_size=32):
+    gnn.train()
+    predictor.train()
+    
+    train_loader = DataLoader(dataset[split_idx['train']], batch_size=batch_size, shuffle=True)
+    
+    total_loss = 0.0
+    for batch in train_loader:
+        optimizer.zero_grad()
+        batch = batch.to(device)
+        
+        if graph_type == 'heterogeneous':
+            h = gnn(batch.x, batch.edge_index, batch.edge_attr)
+        else:
+            h = gnn(batch.x, batch.edge_index)
+            
+        h_graph = global_mean_pool(h, batch.batch)
+        out = predictor(h_graph)
+        
+        is_labeled = batch.y == batch.y
+        loss = F.cross_entropy(out[is_labeled], batch.y.view(-1)[is_labeled].long())
+        
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+        
+    return total_loss / len(train_loader)
 
-def eval_graph_classification(model, dataset, split_idx, evaluator, device):
-    # Placeholder
-    return 0.0
+def eval_graph_classification(gnn, predictor, dataset, split_idx, evaluator, device, graph_type, batch_size=32):
+    gnn.eval()
+    predictor.eval()
+    
+    y_true = []
+    y_pred = []
+    
+    test_loader = DataLoader(dataset[split_idx['test']], batch_size=batch_size, shuffle=False)
+    
+    with torch.no_grad():
+        for batch in test_loader:
+            batch = batch.to(device)
+            if graph_type == 'heterogeneous':
+                h = gnn(batch.x, batch.edge_index, batch.edge_attr)
+            else:
+                h = gnn(batch.x, batch.edge_index)
+                
+            h_graph = global_mean_pool(h, batch.batch)
+            out = predictor(h_graph)
+            
+            y_pred.append(out.argmax(dim=-1).view(-1, 1).cpu())
+            y_true.append(batch.y.view(-1, 1).cpu())
+            
+    y_true = torch.cat(y_true, dim=0)
+    y_pred = torch.cat(y_pred, dim=0)
+    
+    if evaluator:
+        result = evaluator.eval({'y_true': y_true, 'y_pred': y_pred})
+        if 'acc' in result:
+            return result['acc']
+        return list(result.values())[0]
+    else:
+        correct = (y_pred == y_true).sum().item()
+        return correct / y_true.size(0)
 
 def run_experiment(dataset_name, model_name, optimizer_name, epochs=10, lr=0.01, hidden_channels=256, num_layers=3, dropout=0.5, batch_size=1024):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -272,15 +440,25 @@ def run_experiment(dataset_name, model_name, optimizer_name, epochs=10, lr=0.01,
         data, split_idx, evaluator, _ = data_info
         num_relations = data.edge_attr.max().item() + 1 if hasattr(data, 'edge_attr') and data.edge_attr is not None else 1
         in_channels = data.x.size(1)
-        out_channels = data.y.max().item() + 1 if dataset_name != 'Cora' else 7  # Cora has 7 classes
-        model = get_model(model_name, in_channels, hidden_channels, out_channels, num_layers, dropout, graph_type, num_relations)
-        model.to(device)
-        params = model.parameters()
+        out_channels = hidden_channels
+        gnn = get_model(model_name, in_channels, hidden_channels, out_channels, num_layers, dropout, graph_type, num_relations)
+        num_classes = data.y.max().item() + 1 if dataset_name != 'Cora' else 7  # Cora has 7 classes
+        predictor = NodePredictor(hidden_channels, num_classes, 2, dropout)
+        gnn.to(device)
+        predictor.to(device)
+        params = list(gnn.parameters()) + list(predictor.parameters())
     else:
         # Graph
         dataset, split_idx, evaluator, _ = data_info
-        # Placeholder
-        return 0.0, 0.0
+        in_channels = dataset.num_node_features
+        out_channels = hidden_channels
+        gnn = get_model(model_name, in_channels, hidden_channels, out_channels, num_layers, dropout, graph_type, 1)
+        # OGBG PPA has 37 classes
+        num_classes = dataset.num_classes
+        predictor = GraphPredictor(hidden_channels, num_classes, 2, dropout)
+        gnn.to(device)
+        predictor.to(device)
+        params = list(gnn.parameters()) + list(predictor.parameters())
     
     optimizer = get_optimizer(optimizer_name, params, lr)
     
@@ -289,7 +467,9 @@ def run_experiment(dataset_name, model_name, optimizer_name, epochs=10, lr=0.01,
         if task == 'link':
             loss = train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, graph_type, batch_size)
         elif task == 'node':
-            loss = train_node_classification(model, data, split_idx, optimizer, device, graph_type, batch_size)
+            loss = train_node_classification(gnn, predictor, data, split_idx, optimizer, device, graph_type, batch_size)
+        elif task == 'graph':
+            loss = train_graph_classification(gnn, predictor, dataset, split_idx, optimizer, device, graph_type, batch_size=32)
         print(f'Epoch {epoch}: Loss {loss:.4f}')
     training_time = time.time() - start_time
     
@@ -297,7 +477,9 @@ def run_experiment(dataset_name, model_name, optimizer_name, epochs=10, lr=0.01,
     if task == 'link':
         score = eval_link_prediction(gnn, predictor, data, split_edge, evaluator, device, graph_type)
     elif task == 'node':
-        score = eval_node_classification(model, data, split_idx, evaluator, device, graph_type)
+        score = eval_node_classification(gnn, predictor, data, split_idx, evaluator, device, graph_type)
+    elif task == 'graph':
+        score = eval_graph_classification(gnn, predictor, dataset, split_idx, evaluator, device, graph_type, batch_size=32)
     
     return score, training_time
 
