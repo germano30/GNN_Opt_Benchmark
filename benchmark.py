@@ -229,9 +229,8 @@ def train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, g
     edge_index = data.edge_index.to(device)
     if graph_type == 'heterogeneous':
         edge_type = data.edge_attr.to(device)
-        h = gnn(x, edge_index, edge_type)
     else:
-        h = gnn(x, edge_index)
+        edge_type = None
     
     pos_train_edge = split_edge['train']['edge']
     
@@ -246,11 +245,9 @@ def train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, g
         )
         neg_train_edge = neg_edge_index.t()
     
-    # Combine positive and negative edges
     all_edges = torch.cat([pos_train_edge, neg_train_edge], dim=0)
     labels = torch.cat([torch.ones(pos_train_edge.size(0)), torch.zeros(neg_train_edge.size(0))], dim=0)
     
-    # Create dataset and dataloader
     dataset = torch.utils.data.TensorDataset(all_edges, labels)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     
@@ -259,6 +256,11 @@ def train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, g
         optimizer.zero_grad()
         batch_edges = batch_edges.to(device)
         batch_labels = batch_labels.to(device)
+        
+        if graph_type == 'heterogeneous':
+            h = gnn(x, edge_index, edge_type)
+        else:
+            h = gnn(x, edge_index)
         
         out = predictor(h[batch_edges[:, 0]], h[batch_edges[:, 1]])
         loss = F.binary_cross_entropy(out.squeeze(), batch_labels.float())
@@ -300,12 +302,9 @@ def train_node_classification(gnn, predictor, data, split_idx, optimizer, device
     
     if graph_type == 'heterogeneous':
         edge_type = data.edge_attr.to(device)
-        h = gnn(x, edge_index, edge_type)
     else:
-        h = gnn(x, edge_index)
-    
-    out = predictor(h)
-    
+        edge_type = None
+        
     train_indices = split_idx['train']
     if train_indices.dtype == torch.bool:
         train_indices = train_indices.nonzero(as_tuple=True)[0]
@@ -319,7 +318,12 @@ def train_node_classification(gnn, predictor, data, split_idx, optimizer, device
         batch_indices = batch_indices.to(device)
         batch_labels = batch_labels.to(device)
         
-        batch_out = out[batch_indices]
+        if graph_type == 'heterogeneous':
+            h = gnn(x, edge_index, edge_type)
+        else:
+            h = gnn(x, edge_index)
+            
+        batch_out = predictor(h[batch_indices])
         loss = F.cross_entropy(batch_out, batch_labels)
         
         loss.backward()
