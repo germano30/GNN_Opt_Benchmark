@@ -38,7 +38,6 @@ from ogb.linkproppred import PygLinkPropPredDataset, Evaluator as LinkEvaluator
 from ogb.nodeproppred import PygNodePropPredDataset, Evaluator as NodeEvaluator
 from ogb.graphproppred import PygGraphPropPredDataset, Evaluator as GraphEvaluator
 
-from muon import MuonWithAuxAdam
 import torch.distributed as dist
 dist.get_world_size = lambda *args, **kwargs: 1
 dist.get_rank = lambda *args, **kwargs: 0
@@ -158,22 +157,30 @@ def get_optimizer(name, params, lr):
         hidden_weights = [p for p in params if p.ndim >= 2]
         hidden_gains_biases = [p for p in params if p.ndim < 2]
 
-        param_groups = [
-            dict(
-                params=hidden_weights,
-                use_muon=True,
-                lr=lr, # Usamos o LR do argumento principal (0.01 padrao)
-                weight_decay=5e-4
-            ),
-            dict(
-                params=hidden_gains_biases,
-                use_muon=False,
-                lr=3e-4,
-                betas=(0.9, 0.95),
-                weight_decay=5e-4
-            ),
-        ]
-        return MuonWithAuxAdam(param_groups)
+        opt_muon = torch.optim.Muon(
+            hidden_weights,
+            lr=lr,
+            momentum=0.95,
+            ns_iters=5,
+            adjust_lr_fn='match_rms_adamw'
+        )
+        
+        opt_adam = torch.optim.AdamW(
+            hidden_gains_biases,
+            lr=lr,
+            betas=(0.9, 0.95),
+            weight_decay=5e-4
+        )
+        
+        class _MultipleOptimizer:
+            def __init__(self, *optimizers):
+                self.optimizers = optimizers
+            def zero_grad(self):
+                for opt in self.optimizers: opt.zero_grad()
+            def step(self):
+                for opt in self.optimizers: opt.step()
+                
+        return _MultipleOptimizer(opt_muon, opt_adam)
     elif name == 'Shampoo':
         try:
             import torch_optimizer as optim
