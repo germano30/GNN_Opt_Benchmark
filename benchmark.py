@@ -39,6 +39,10 @@ from ogb.nodeproppred import PygNodePropPredDataset, Evaluator as NodeEvaluator
 from ogb.graphproppred import PygGraphPropPredDataset, Evaluator as GraphEvaluator
 
 from muon import MuonWithAuxAdam
+import torch.distributed as dist
+dist.get_world_size = lambda *args, **kwargs: 1
+dist.get_rank = lambda *args, **kwargs: 0
+dist.all_gather = lambda *args, **kwargs: None
 try:
     from preconditioned_stochastic_gradient_descent import PSGD # usually SOAP is implemented here or via another package
 except ImportError:
@@ -150,14 +154,7 @@ def get_optimizer(name, params, lr):
         return torch.optim.AdamW(params, lr=lr)
     elif name == 'SGD':
         return torch.optim.SGD(params, lr=lr)
-    elif name == 'Muon':
-        import torch.distributed as dist
-        if not dist.is_initialized() and torch.distributed.is_available():
-            dist.is_initialized = lambda *args, **kwargs: True
-            dist.get_world_size = lambda *args, **kwargs: 1
-            dist.get_rank = lambda *args, **kwargs: 0
-            dist.all_gather = lambda *args, **kwargs: None
-            
+    elif name == 'Muon':            
         hidden_weights = [p for p in params if p.ndim >= 2]
         hidden_gains_biases = [p for p in params if p.ndim < 2]
 
