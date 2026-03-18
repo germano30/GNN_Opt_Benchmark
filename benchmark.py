@@ -151,6 +151,13 @@ def get_optimizer(name, params, lr):
     elif name == 'SGD':
         return torch.optim.SGD(params, lr=lr)
     elif name == 'Muon':
+        import torch.distributed as dist
+        if not dist.is_initialized() and torch.distributed.is_available():
+            dist.is_initialized = lambda *args, **kwargs: True
+            dist.get_world_size = lambda *args, **kwargs: 1
+            dist.get_rank = lambda *args, **kwargs: 0
+            dist.all_gather = lambda *args, **kwargs: None
+            
         hidden_weights = [p for p in params if p.ndim >= 2]
         hidden_gains_biases = [p for p in params if p.ndim < 2]
 
