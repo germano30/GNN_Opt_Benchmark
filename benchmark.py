@@ -1,6 +1,15 @@
 import argparse
 import time
 import torch
+
+_original_load = torch.load
+
+def custom_load(*args, **kwargs):
+    kwargs.setdefault('weights_only', False)
+    return _original_load(*args, **kwargs)
+
+torch.load = custom_load
+
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torch_geometric.transforms as T
@@ -66,14 +75,6 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 set_seed(42)
-
-_original_load = torch.load
-
-def custom_load(*args, **kwargs):
-    kwargs.setdefault('weights_only', False)
-    return _original_load(*args, **kwargs)
-
-torch.load = custom_load
 
 class LinkPredictor(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers, dropout):
