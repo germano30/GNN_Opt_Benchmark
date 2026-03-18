@@ -151,7 +151,25 @@ def get_optimizer(name, params, lr):
     elif name == 'SGD':
         return torch.optim.SGD(params, lr=lr)
     elif name == 'Muon':
-        return MuonWithAuxAdam(params, lr=lr)
+        hidden_weights = [p for p in params if p.ndim >= 2]
+        hidden_gains_biases = [p for p in params if p.ndim < 2]
+
+        param_groups = [
+            dict(
+                params=hidden_weights,
+                use_muon=True,
+                lr=lr, # Usamos o LR do argumento principal (0.01 padrao)
+                weight_decay=5e-4
+            ),
+            dict(
+                params=hidden_gains_biases,
+                use_muon=False,
+                lr=3e-4,
+                betas=(0.9, 0.95),
+                weight_decay=5e-4
+            ),
+        ]
+        return MuonWithAuxAdam(param_groups)
     elif name == 'Shampoo':
         try:
             import torch_optimizer as optim
