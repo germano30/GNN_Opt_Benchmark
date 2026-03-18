@@ -263,7 +263,7 @@ def train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, g
             h = gnn(x, edge_index)
         
         out = predictor(h[batch_edges[:, 0]], h[batch_edges[:, 1]])
-        loss = F.binary_cross_entropy(out.squeeze(), batch_labels.float())
+        loss = F.binary_cross_entropy(out.squeeze(-1), batch_labels.float())
         
         loss.backward()
         optimizer.step()
@@ -286,11 +286,18 @@ def eval_link_prediction(gnn, predictor, data, split_edge, evaluator, device, gr
     pos_test_edge = split_edge['test']['edge'].to(device)
     neg_test_edge = split_edge['test']['edge_neg'].to(device)
     
-    pos_out = predictor(h[pos_test_edge[:, 0]], h[pos_test_edge[:, 1]])
-    neg_out = predictor(h[neg_test_edge[:, 0]], h[neg_test_edge[:, 1]])
+    pos_out = predictor(h[pos_test_edge[:, 0]], h[pos_test_edge[:, 1]]).squeeze(-1)
+    neg_out = predictor(h[neg_test_edge[:, 0]], h[neg_test_edge[:, 1]]).squeeze(-1)
     
     result = evaluator.eval({'y_pred_pos': pos_out, 'y_pred_neg': neg_out})
-    return result['hits@20']  # Assuming
+    if 'hits@50' in result:
+        return result['hits@50']
+    elif 'hits@20' in result:
+        return result['hits@20']
+    elif 'mrr_list' in result:
+        return result['mrr_list'].mean().item()
+    else:
+        return list(result.values())[0]
 
 def train_node_classification(gnn, predictor, data, split_idx, optimizer, device, graph_type, batch_size=1024):
     gnn.train()
@@ -324,7 +331,10 @@ def train_node_classification(gnn, predictor, data, split_idx, optimizer, device
             h = gnn(x, edge_index)
             
         batch_out = predictor(h[batch_indices])
-        loss = F.cross_entropy(batch_out, batch_labels)
+        if batch_labels.dim() > 1 and batch_labels.shape[-1] > 1:
+            loss = F.binary_cross_entropy_with_logits(batch_out, batch_labels.float())
+        else:
+            loss = F.cross_entropy(batch_out, batch_labels.squeeze().long())
         
         loss.backward()
         optimizer.step()
@@ -348,16 +358,23 @@ def eval_node_classification(gnn, predictor, data, split_idx, evaluator, device,
         
     out = predictor(h)
     
-    pred = out.argmax(dim=1)
     test_indices = split_idx['test']
     if test_indices.dtype == torch.bool:
         test_indices = test_indices.nonzero(as_tuple=True)[0]
         
     if evaluator:
-        result = evaluator.eval({'y_true': y[test_indices].unsqueeze(-1), 'y_pred': pred[test_indices].unsqueeze(-1)})
-        return result['acc']
+        y_true = y[test_indices]
+        y_pred = out[test_indices]
+        if y_true.dim() == 1 or y_true.shape[-1] == 1:
+            y_pred = y_pred.argmax(dim=-1, keepdim=True)
+            if y_true.dim() == 1:
+                y_true = y_true.unsqueeze(-1)
+        result = evaluator.eval({'y_true': y_true, 'y_pred': y_pred})
+        return list(result.values())[0]
     else:
-        correct = (pred[test_indices] == y[test_indices]).sum().item()
+        pred = out[test_indices].argmax(dim=-1)
+        y_true = y[test_indices]
+        correct = (pred == (y_true.squeeze() if y_true.dim() > 1 else y_true)).sum().item()
         return correct / test_indices.numel()
 
 # Graph classification
@@ -381,7 +398,10 @@ def train_graph_classification(gnn, predictor, dataset, split_idx, optimizer, de
         out = predictor(h_graph)
         
         is_labeled = batch.y == batch.y
-        loss = F.cross_entropy(out[is_labeled], batch.y.view(-1)[is_labeled].long())
+        if batch.y.dim() > 1 and batch.y.shape[-1] > 1:
+            loss = F.binary_cross_entropy_with_logits(out[is_labeled], batch.y[is_labeled].float())
+        else:
+            loss = F.cross_entropy(out[is_labeled], batch.y.view(-1)[is_labeled].long())
         
         loss.backward()
         optimizer.step()
@@ -409,8 +429,12 @@ def eval_graph_classification(gnn, predictor, dataset, split_idx, evaluator, dev
             h_graph = global_mean_pool(h, batch.batch)
             out = predictor(h_graph)
             
-            y_pred.append(out.argmax(dim=-1).view(-1, 1).cpu())
-            y_true.append(batch.y.view(-1, 1).cpu())
+            if batch.y.dim() > 1 and batch.y.shape[-1] > 1:
+                y_pred.append(out.cpu())
+                y_true.append(batch.y.cpu())
+            else:
+                y_pred.append(out.argmax(dim=-1).view(-1, 1).cpu())
+                y_true.append(batch.y.view(-1, 1).cpu())
             
     y_true = torch.cat(y_true, dim=0)
     y_pred = torch.cat(y_pred, dim=0)
