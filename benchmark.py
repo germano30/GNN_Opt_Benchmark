@@ -38,6 +38,7 @@ from ogb.linkproppred import PygLinkPropPredDataset, Evaluator as LinkEvaluator
 from ogb.nodeproppred import PygNodePropPredDataset, Evaluator as NodeEvaluator
 from ogb.graphproppred import PygGraphPropPredDataset, Evaluator as GraphEvaluator
 
+from muon import MuonWithAuxAdam
 import torch.distributed as dist
 dist.get_world_size = lambda *args, **kwargs: 1
 dist.get_rank = lambda *args, **kwargs: 0
@@ -154,33 +155,35 @@ def get_optimizer(name, params, lr):
     elif name == 'SGD':
         return torch.optim.SGD(params, lr=lr)
     elif name == 'Muon':            
+        import math
         hidden_weights = [p for p in params if p.ndim >= 2]
         hidden_gains_biases = [p for p in params if p.ndim < 2]
 
-        opt_muon = torch.optim.Muon(
-            hidden_weights,
-            lr=lr,
-            momentum=0.95,
-            ns_iters=5,
-            adjust_lr_fn='match_rms_adamw'
-        )
+        param_groups = []
         
-        opt_adam = torch.optim.AdamW(
-            hidden_gains_biases,
-            lr=lr,
-            betas=(0.9, 0.95),
-            weight_decay=5e-4
+        # Simula o comportamento do adjust_lr_fn="match_rms_adamw" da implementacao nativa
+        # O PyTorch calcula: ratio = 0.2 * sqrt(max(A, B))
+        for p in hidden_weights:
+            A, B = p.shape[:2]
+            adjusted_ratio = 0.2 * math.sqrt(max(A, B))
+            
+            param_groups.append(dict(
+                params=[p],
+                use_muon=True,
+                lr=lr * adjusted_ratio,
+                weight_decay=5e-4 / adjusted_ratio
+            ))
+            
+        param_groups.append(
+            dict(
+                params=hidden_gains_biases,
+                use_muon=False,
+                lr=lr, # AdamW passa a usar a mesma taxa do Muon
+                betas=(0.9, 0.95),
+                weight_decay=5e-4
+            )
         )
-        
-        class _MultipleOptimizer:
-            def __init__(self, *optimizers):
-                self.optimizers = optimizers
-            def zero_grad(self):
-                for opt in self.optimizers: opt.zero_grad()
-            def step(self):
-                for opt in self.optimizers: opt.step()
-                
-        return _MultipleOptimizer(opt_muon, opt_adam)
+        return MuonWithAuxAdam(param_groups)
     elif name == 'Shampoo':
         try:
             import torch_optimizer as optim
