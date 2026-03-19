@@ -149,15 +149,18 @@ class NodePredictor(torch.nn.Module):
         return x
 
 # Placeholder for optimizers
-def get_optimizer(name, params, lr):
+def get_optimizer(name, named_params, lr):
+    params = [p for n, p in named_params] # Extrai apenas os tensores para os otimizadores padroes genericos
+    
     if name == 'AdamW':
         return torch.optim.AdamW(params, lr=lr)
     elif name == 'SGD':
         return torch.optim.SGD(params, lr=lr)
     elif name == 'Muon':            
         import math
-        hidden_weights = [p for p in params if p.ndim >= 2]
-        hidden_gains_biases = [p for p in params if p.ndim < 2]
+        # Filtra ativamente qualquer parametro de 'embedding' para longe do Muon, mesmo que seja 2D.
+        hidden_weights = [p for n, p in named_params if p.ndim >= 2 and 'embed' not in n.lower()]
+        hidden_gains_biases = [p for n, p in named_params if p.ndim < 2 or 'embed' in n.lower()]
 
         param_groups = []
         
@@ -212,7 +215,7 @@ DATASETS = {
 
 MODELS_HOMO = ['GCN', 'GAT', 'GIN']
 MODELS_HETERO = ['RGCN', 'RGAT']
-OPTIMIZERS = ['AdamW', 'SGD', 'Muon']
+OPTIMIZERS = ['AdamW', 'SGD', 'Muon','Shampoo','SOAP']
 
 def load_dataset(name):
     if name == 'Cora':
@@ -491,28 +494,43 @@ def run_experiment(dataset_name, model_name, optimizer_name, epochs=10, lr=0.01,
     if task == 'link':
         data, split_edge, evaluator, _ = data_info
         num_relations = data.edge_attr.max().item() + 1 if hasattr(data, 'edge_attr') and data.edge_attr is not None else 1
-        in_channels = data.x.size(1)
+        if hasattr(data, 'x') and data.x is not None:
+            in_channels = data.x.size(1)
+        else:
+            in_channels = hidden_channels
+            print(f"\n[AVISO] Dataset '{dataset_name}' (link) nao possui features 'data.x'. A GNN '{model_name}' deve construir um Embedding interno.\n")
         out_channels = hidden_channels
         gnn = get_model(model_name, in_channels, hidden_channels, out_channels, num_layers, dropout, graph_type, num_relations)
         predictor = LinkPredictor(hidden_channels, hidden_channels, 1, 2, dropout)
         gnn.to(device)
         predictor.to(device)
-        params = list(gnn.parameters()) + list(predictor.parameters())
+        named_params = list(gnn.named_parameters()) + list(predictor.named_parameters())
     elif task == 'node':
         data, split_idx, evaluator, _ = data_info
         num_relations = data.edge_attr.max().item() + 1 if hasattr(data, 'edge_attr') and data.edge_attr is not None else 1
-        in_channels = data.x.size(1)
+        if hasattr(data, 'x') and data.x is not None:
+            in_channels = data.x.size(1)
+        else:
+            in_channels = hidden_channels
+            print(f"\n[AVISO] Dataset '{dataset_name}' (node) nao possui features 'data.x'. A GNN '{model_name}' deve construir um Embedding interno.\n")
         out_channels = hidden_channels
         gnn = get_model(model_name, in_channels, hidden_channels, out_channels, num_layers, dropout, graph_type, num_relations)
         num_classes = data.y.max().item() + 1 if dataset_name != 'Cora' else 7  # Cora has 7 classes
         predictor = NodePredictor(hidden_channels, num_classes, 2, dropout)
         gnn.to(device)
         predictor.to(device)
-        params = list(gnn.parameters()) + list(predictor.parameters())
+        named_params = list(gnn.named_parameters()) + list(predictor.named_parameters())
     else:
         # Graph
         dataset, split_idx, evaluator, _ = data_info
-        in_channels = dataset.num_node_features
+        
+        if hasattr(dataset, 'num_node_features') and dataset.num_node_features > 0:
+            in_channels = dataset.num_node_features
+        elif hasattr(dataset[0], 'x') and dataset[0].x is not None:
+             in_channels = dataset[0].x.size(1)
+        else:
+            in_channels = hidden_channels
+            
         out_channels = hidden_channels
         gnn = get_model(model_name, in_channels, hidden_channels, out_channels, num_layers, dropout, graph_type, 1)
         # OGBG PPA has 37 classes
@@ -520,9 +538,9 @@ def run_experiment(dataset_name, model_name, optimizer_name, epochs=10, lr=0.01,
         predictor = GraphPredictor(hidden_channels, num_classes, 2, dropout)
         gnn.to(device)
         predictor.to(device)
-        params = list(gnn.parameters()) + list(predictor.parameters())
+        named_params = list(gnn.named_parameters()) + list(predictor.named_parameters())
     
-    optimizer = get_optimizer(optimizer_name, params, lr)
+    optimizer = get_optimizer(optimizer_name, named_params, lr)
     
     train_losses = []
     eval_scores = []
