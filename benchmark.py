@@ -323,13 +323,13 @@ def eval_link_prediction(gnn, predictor, data, split_edge, evaluator, device, gr
     
     result = evaluator.eval({'y_pred_pos': pos_out, 'y_pred_neg': neg_out})
     if 'hits@50' in result:
-        return result['hits@50']
+        return result['hits@50'], 'Hits@50'
     elif 'hits@20' in result:
-        return result['hits@20']
+        return result['hits@20'], 'Hits@20'
     elif 'mrr_list' in result:
-        return result['mrr_list'].mean().item()
+        return result['mrr_list'].mean().item(), 'MRR'
     else:
-        return list(result.values())[0]
+        return list(result.values())[0], list(result.keys())[0]
 
 def train_node_classification(gnn, predictor, data, split_idx, optimizer, device, graph_type, batch_size=1024):
     gnn.train()
@@ -402,12 +402,12 @@ def eval_node_classification(gnn, predictor, data, split_idx, evaluator, device,
             if y_true.dim() == 1:
                 y_true = y_true.unsqueeze(-1)
         result = evaluator.eval({'y_true': y_true, 'y_pred': y_pred})
-        return list(result.values())[0]
+        return list(result.values())[0], list(result.keys())[0]
     else:
         pred = out[test_indices].argmax(dim=-1)
         y_true = y[test_indices]
         correct = (pred == (y_true.squeeze() if y_true.dim() > 1 else y_true)).sum().item()
-        return correct / test_indices.numel()
+        return correct / test_indices.numel(), 'Accuracy'
 
 # Graph classification
 def train_graph_classification(gnn, predictor, dataset, split_idx, optimizer, device, graph_type, batch_size=32):
@@ -474,13 +474,14 @@ def eval_graph_classification(gnn, predictor, dataset, split_idx, evaluator, dev
     if evaluator:
         result = evaluator.eval({'y_true': y_true, 'y_pred': y_pred})
         if 'acc' in result:
-            return result['acc']
-        return list(result.values())[0]
+            return result['acc'], 'Accuracy'
+        return list(result.values())[0], list(result.keys())[0]
     else:
         correct = (y_pred == y_true).sum().item()
-        return correct / y_true.size(0)
+        return correct / y_true.size(0), 'Accuracy'
 
 def run_experiment(dataset_name, model_name, optimizer_name, epochs=10, lr=0.01, hidden_channels=256, num_layers=3, dropout=0.5, batch_size=1024):
+    set_seed(42) 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     data_info = load_dataset(dataset_name)
@@ -523,32 +524,35 @@ def run_experiment(dataset_name, model_name, optimizer_name, epochs=10, lr=0.01,
     
     optimizer = get_optimizer(optimizer_name, params, lr)
     
+    train_losses = []
+    eval_scores = []
+    metric_name = "Score"
+    
     start_time = time.time()
     for epoch in range(epochs):
         if task == 'link':
             loss = train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, graph_type, batch_size)
+            score, m_name = eval_link_prediction(gnn, predictor, data, split_edge, evaluator, device, graph_type)
         elif task == 'node':
             loss = train_node_classification(gnn, predictor, data, split_idx, optimizer, device, graph_type, batch_size)
+            score, m_name = eval_node_classification(gnn, predictor, data, split_idx, evaluator, device, graph_type)
         elif task == 'graph':
             loss = train_graph_classification(gnn, predictor, dataset, split_idx, optimizer, device, graph_type, batch_size=32)
-        print(f'Epoch {epoch}: Loss {loss:.4f}')
+            score, m_name = eval_graph_classification(gnn, predictor, dataset, split_idx, evaluator, device, graph_type, batch_size=32)
+            
+        train_losses.append(loss)
+        eval_scores.append(score)
+        metric_name = m_name
+        print(f'Epoch {epoch+1:03d}/{epochs}: Train Loss {loss:.4f} | Val/Test {metric_name}: {score:.4f}')
+        
     training_time = time.time() - start_time
-    
-    # Evaluate
-    if task == 'link':
-        score = eval_link_prediction(gnn, predictor, data, split_edge, evaluator, device, graph_type)
-    elif task == 'node':
-        score = eval_node_classification(gnn, predictor, data, split_idx, evaluator, device, graph_type)
-    elif task == 'graph':
-        score = eval_graph_classification(gnn, predictor, dataset, split_idx, evaluator, device, graph_type, batch_size=32)
-    
-    return score, training_time
+    return eval_scores[-1], training_time, train_losses, eval_scores, metric_name
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, required=True, choices=DATASETS.keys())
     parser.add_argument('--model', type=str, required=True)
-    parser.add_argument('--optimizer', type=str, required=True, choices=OPTIMIZERS)
+    parser.add_argument('--optimizer', type=str, required=True, choices=OPTIMIZERS + ['all'])
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--batch_size', type=int, default=1024)
@@ -560,5 +564,59 @@ if __name__ == '__main__':
     if DATASETS[args.dataset]['graph_type'] == 'heterogeneous' and args.model not in MODELS_HETERO:
         raise ValueError("Invalid model for heterogeneous graph")
     
-    score, time_taken = run_experiment(args.dataset, args.model, args.optimizer, args.epochs, args.lr, batch_size=args.batch_size)
-    print(f'Dataset: {args.dataset}, Model: {args.model}, Optimizer: {args.optimizer}, Score: {score:.4f}, Time: {time_taken:.2f}s')
+    if args.optimizer == 'all':
+        opts_to_run = OPTIMIZERS
+    else:
+        opts_to_run = [args.optimizer]
+        
+    results = {}
+    for opt in opts_to_run:
+        print(f"\n[{opt}] Iniciando treinamento no dataset {args.dataset} com modelo {args.model}...")
+        try:
+            final_score, time_taken, losses, scores, metric_name = run_experiment(
+                args.dataset, args.model, opt, args.epochs, args.lr, batch_size=args.batch_size
+            )
+            print(f"> [{opt}] Tempo: {time_taken:.2f}s | Final {metric_name}: {final_score:.4f}")
+            results[opt] = {
+                'losses': losses,
+                'scores': scores,
+                'final_score': final_score,
+                'time': time_taken,
+                'metric_name': metric_name
+            }
+        except Exception as e:
+            print(f"> Erro ao rodar otimizador {opt}: {str(e)}")
+            
+    if results:
+        # Gerar grafico
+        import matplotlib.pyplot as plt
+        import os
+        
+        plt.figure(figsize=(12, 5))
+        
+        # Subplot 1: Loss
+        plt.subplot(1, 2, 1)
+        for opt, hist in results.items():
+            plt.plot(range(1, args.epochs + 1), hist['losses'], label=f"{opt}")
+        plt.title(f'Treinamento Loss ({args.dataset} / {args.model})')
+        plt.xlabel('Epoca')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Subplot 2: Score
+        plt.subplot(1, 2, 2)
+        # Pega a metrica usada do primeiro resultado valido no dicionario
+        metric = list(results.values())[0]['metric_name']
+        for opt, hist in results.items():
+            plt.plot(range(1, args.epochs + 1), hist['scores'], label=f"{opt} ({metric} final={hist['final_score']:.3f})")
+        plt.title(f'Score de Validacao/Teste ({metric})')
+        plt.xlabel('Epoca')
+        plt.ylabel(metric)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plot_path = f"comparativo_{args.dataset}_{args.model}.png"
+        plt.savefig(plot_path)
+        print(f"\nGrafico comparativo salvo com sucesso em: {plot_path}")
