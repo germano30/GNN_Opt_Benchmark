@@ -47,7 +47,7 @@ def get_optimizer(name, named_params, lr):
             raise ImportError("Please install torch_optimizer for Shampoo: pip install torch-optimizer")
     elif name == 'SOAP':
         try:
-            from soap import SOAP
+            from utils.soap import SOAP
             return SOAP(params, lr=lr)
         except ImportError:
             raise ImportError("Please ensure SOAP optimizer is available (e.g. from soap import SOAP)")
