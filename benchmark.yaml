@@ -1,0 +1,23 @@
+experiment:
+  runs: 5             # Numero de seeds diferentes para rodar
+  epochs: 50          # Epocas de treinamento por seed
+  patience: 20        # Early Stopping: Para se o Validation Score nao melhorar em N epocas
+  batch_size: 1024    # Tamanho do batch
+
+hyperparameters:
+  lr: 0.01
+  weight_decay: 0.0005
+  hidden_channels: 256
+  num_layers: 3
+  dropout: 0.3
+
+targets:
+  datasets:
+    - Cora
+  models:
+    - GCN
+  optimizers:
+    - AdamW
+    - SOAP
+    - Shampoo
+    - Muon

@@ -148,14 +148,15 @@ class NodePredictor(torch.nn.Module):
         x = self.lins[-1](x)
         return x
 
-# Placeholder for optimizers
-def get_optimizer(name, named_params, lr):
+def get_optimizer(name, named_params, lr, weight_decay=None):
     params = [p for n, p in named_params] # Extrai apenas os tensores para os otimizadores padroes genericos
     
     if name == 'AdamW':
-        return torch.optim.AdamW(params, lr=lr)
+        wd = weight_decay if weight_decay is not None else 1e-2
+        return torch.optim.AdamW(params, lr=lr, weight_decay=wd)
     elif name == 'SGD':
-        return torch.optim.SGD(params, lr=lr)
+        wd = weight_decay if weight_decay is not None else 0
+        return torch.optim.SGD(params, lr=lr, weight_decay=wd)
     elif name == 'Muon':            
         import math
         # Filtra ativamente qualquer parametro de 'embedding' para longe do Muon, mesmo que seja 2D.
@@ -174,7 +175,7 @@ def get_optimizer(name, named_params, lr):
                 params=[p],
                 use_muon=True,
                 lr=lr * adjusted_ratio,
-                weight_decay=5e-4 / adjusted_ratio
+                weight_decay=(weight_decay if weight_decay is not None else 5e-4) / adjusted_ratio
             ))
             
         param_groups.append(
@@ -183,20 +184,22 @@ def get_optimizer(name, named_params, lr):
                 use_muon=False,
                 lr=lr, # AdamW passa a usar a mesma taxa do Muon
                 betas=(0.9, 0.95),
-                weight_decay=5e-4
+                weight_decay=(weight_decay if weight_decay is not None else 5e-4)
             )
         )
         return MuonWithAuxAdam(param_groups)
     elif name == 'Shampoo':
         try:
             import torch_optimizer as optim
-            return optim.Shampoo(params, lr=lr)
+            wd = weight_decay if weight_decay is not None else 0
+            return optim.Shampoo(params, lr=lr, weight_decay=wd)
         except ImportError:
             raise ImportError("Please install torch_optimizer for Shampoo: pip install torch-optimizer")
     elif name == 'SOAP':
         try:
             from utils.soap import SOAP
-            return SOAP(params, lr=lr)
+            wd = weight_decay if weight_decay is not None else 0.01
+            return SOAP(params, lr=lr, weight_decay=wd)
         except ImportError:
             # Another common source is via optimizer package or bitsandbytes, we'll assume a local 'soap.py' or package 'soap'
             raise ImportError("Please ensure SOAP optimizer is available (e.g. from soap import SOAP)")
@@ -483,8 +486,10 @@ def eval_graph_classification(gnn, predictor, dataset, split_idx, evaluator, dev
         correct = (y_pred == y_true).sum().item()
         return correct / y_true.size(0), 'Accuracy'
 
-def run_experiment(dataset_name, model_name, optimizer_name, epochs=10, lr=0.01, hidden_channels=256, num_layers=3, dropout=0.5, batch_size=1024):
-    set_seed(42) 
+def run_experiment(dataset_name, model_name, optimizer_name, seed=42, epochs=10, lr=0.01, 
+                   weight_decay=None, patience=None,
+                   hidden_channels=256, num_layers=3, dropout=0.5, batch_size=1024):
+    set_seed(seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     data_info = load_dataset(dataset_name)
@@ -540,11 +545,13 @@ def run_experiment(dataset_name, model_name, optimizer_name, epochs=10, lr=0.01,
         predictor.to(device)
         named_params = list(gnn.named_parameters()) + list(predictor.named_parameters())
     
-    optimizer = get_optimizer(optimizer_name, named_params, lr)
+    optimizer = get_optimizer(optimizer_name, named_params, lr, weight_decay)
     
     train_losses = []
     eval_scores = []
     metric_name = "Score"
+    best_score = -1.0
+    epochs_no_improve = 0
     
     start_time = time.time()
     for epoch in range(epochs):
@@ -561,10 +568,24 @@ def run_experiment(dataset_name, model_name, optimizer_name, epochs=10, lr=0.01,
         train_losses.append(loss)
         eval_scores.append(score)
         metric_name = m_name
+        
+        if score > best_score:
+            best_score = score
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            
         print(f'Epoch {epoch+1:03d}/{epochs}: Train Loss {loss:.4f} | Val/Test {metric_name}: {score:.4f}')
         
+        if patience is not None and epochs_no_improve >= patience:
+            print(f"Early stopping at epoch {epoch+1}!")
+            rem_epochs = epochs - (epoch + 1)
+            train_losses.extend([loss] * rem_epochs)
+            eval_scores.extend([score] * rem_epochs)
+            break
+            
     training_time = time.time() - start_time
-    return eval_scores[-1], training_time, train_losses, eval_scores, metric_name
+    return best_score, training_time, train_losses, eval_scores, metric_name
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -574,6 +595,7 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--batch_size', type=int, default=1024)
+    parser.add_argument('--runs', type=int, default=1, help='Numero de execucoes com seeds diferentes')
     args = parser.parse_args()
     
     # Check model
@@ -582,24 +604,73 @@ if __name__ == '__main__':
     if DATASETS[args.dataset]['graph_type'] == 'heterogeneous' and args.model not in MODELS_HETERO:
         raise ValueError("Invalid model for heterogeneous graph")
     
-    if args.optimizer == 'all':
-        opts_to_run = OPTIMIZERS
-    else:
-        opts_to_run = [args.optimizer]
+    if args.config:
+        import yaml
+        with open(args.config, 'r') as f:
+            cfg = yaml.safe_load(f)
+            
+        runs_cfg = cfg.get('experiment', {}).get('runs', args.runs)
+        epochs_cfg = cfg.get('experiment', {}).get('epochs', args.epochs)
+        batch_size_cfg = cfg.get('experiment', {}).get('batch_size', args.batch_size)
+        patience_cfg = cfg.get('experiment', {}).get('patience', None)
         
+        lr_cfg = cfg.get('hyperparameters', {}).get('lr', args.lr)
+        weight_decay_cfg = cfg.get('hyperparameters', {}).get('weight_decay', None)
+        hidden_channels_cfg = cfg.get('hyperparameters', {}).get('hidden_channels', 256)
+        num_layers_cfg = cfg.get('hyperparameters', {}).get('num_layers', 3)
+        dropout_cfg = cfg.get('hyperparameters', {}).get('dropout', 0.5)
+        
+        datasets_list = cfg.get('targets', {}).get('datasets', [args.dataset])
+        models_list = cfg.get('targets', {}).get('models', [args.model])
+        optimizers_list = cfg.get('targets', {}).get('optimizers', [args.optimizer])
+        if 'all' in optimizers_list:
+            optimizers_list = OPTIMIZERS
+    else:
+        runs_cfg = args.runs
+        epochs_cfg = args.epochs
+        lr_cfg = args.lr
+        batch_size_cfg = args.batch_size
+        patience_cfg = None
+        weight_decay_cfg = None
+        hidden_channels_cfg = 256
+        num_layers_cfg = 3
+        dropout_cfg = 0.5
+        
+        datasets_list = [args.dataset]
+        models_list = [args.model]
+        optimizers_list = OPTIMIZERS if args.optimizer == 'all' else [args.optimizer]
+
     results = {}
-    for opt in opts_to_run:
-        print(f"\n[{opt}] Iniciando treinamento no dataset {args.dataset} com modelo {args.model}...")
+    for opt in optimizers_list:
+        print(f"\n[{opt}] Iniciando treinamento no dataset {args.dataset} com modelo {args.model} ({runs_cfg} runs)...")
+        opt_final_scores = []
+        opt_losses = []
+        opt_scores = []
+        time_takens = []
+        
         try:
-            final_score, time_taken, losses, scores, metric_name = run_experiment(
-                args.dataset, args.model, opt, args.epochs, args.lr, batch_size=args.batch_size
-            )
-            print(f"> [{opt}] Tempo: {time_taken:.2f}s | Final {metric_name}: {final_score:.4f}")
+            for run_idx in range(runs_cfg):
+                seed = 42 + run_idx
+                final_score, time_taken, losses, scores, metric_name = run_experiment(
+                    args.dataset, args.model, opt, seed, epochs_cfg, lr_cfg,
+                    weight_decay_cfg, patience_cfg, hidden_channels_cfg, num_layers_cfg, dropout_cfg, batch_size_cfg
+                )
+                opt_final_scores.append(final_score)
+                opt_losses.append(losses)
+                opt_scores.append(scores)
+                time_takens.append(time_taken)
+            
+            mean_final_score = np.mean(opt_final_scores)
+            std_final_score = np.std(opt_final_scores)
+            mean_time = np.mean(time_takens)
+            
+            print(f"> [{opt}] Tempo medio: {mean_time:.2f}s | Final {metric_name}: {mean_final_score:.4f} ± {std_final_score:.4f}")
             results[opt] = {
-                'losses': losses,
-                'scores': scores,
-                'final_score': final_score,
-                'time': time_taken,
+                'losses': np.array(opt_losses),
+                'scores': np.array(opt_scores),
+                'mean_final_score': mean_final_score,
+                'std_final_score': std_final_score,
+                'time': mean_time,
                 'metric_name': metric_name
             }
         except Exception as e:
@@ -615,7 +686,12 @@ if __name__ == '__main__':
         # Subplot 1: Loss
         plt.subplot(1, 2, 1)
         for opt, hist in results.items():
-            plt.plot(range(1, args.epochs + 1), hist['losses'], label=f"{opt}")
+            mean_loss = hist['losses'].mean(axis=0)
+            std_loss = hist['losses'].std(axis=0)
+            epochs_range = range(1, args.epochs + 1)
+            line, = plt.plot(epochs_range, mean_loss, label=f"{opt}")
+            if args.runs > 1:
+                plt.fill_between(epochs_range, mean_loss - std_loss, mean_loss + std_loss, alpha=0.2, color=line.get_color())
         plt.title(f'Treinamento Loss ({args.dataset} / {args.model})')
         plt.xlabel('Epoca')
         plt.ylabel('Loss')
@@ -627,7 +703,12 @@ if __name__ == '__main__':
         # Pega a metrica usada do primeiro resultado valido no dicionario
         metric = list(results.values())[0]['metric_name']
         for opt, hist in results.items():
-            plt.plot(range(1, args.epochs + 1), hist['scores'], label=f"{opt} ({metric} final={hist['final_score']:.3f})")
+            mean_score = hist['scores'].mean(axis=0)
+            std_score = hist['scores'].std(axis=0)
+            epochs_range = range(1, args.epochs + 1)
+            line, = plt.plot(epochs_range, mean_score, label=f"{opt} ({metric} final={hist['mean_final_score']:.3f}±{hist['std_final_score']:.3f})")
+            if args.runs > 1:
+                plt.fill_between(epochs_range, mean_score - std_score, mean_score + std_score, alpha=0.2, color=line.get_color())
         plt.title(f'Score de Validacao/Teste ({metric})')
         plt.xlabel('Epoca')
         plt.ylabel(metric)
