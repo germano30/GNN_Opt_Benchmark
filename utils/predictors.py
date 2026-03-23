@@ -23,7 +23,7 @@ class LinkPredictor(nn.Module):
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.lins[-1](x)
-        return torch.sigmoid(x)
+        return x
 
 
 class GraphPredictor(nn.Module):

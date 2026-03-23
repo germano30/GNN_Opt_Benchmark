@@ -116,7 +116,7 @@ class LinkPredictor(torch.nn.Module):
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.lins[-1](x)
-        return torch.sigmoid(x)
+        return x
 
 
 class GraphPredictor(torch.nn.Module):
@@ -315,7 +315,7 @@ def train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, g
             h = gnn(x, edge_index)
         
         out = predictor(h[batch_edges[:, 0]], h[batch_edges[:, 1]])
-        loss = F.binary_cross_entropy(out.squeeze(-1), batch_labels.float())
+        loss = F.binary_cross_entropy_with_logits(out.squeeze(-1), batch_labels.float())
         
         loss.backward()
         optimizer.step()

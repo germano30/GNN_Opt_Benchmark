@@ -47,7 +47,7 @@ def train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, g
             h = gnn(x, edge_index)
         
         out = predictor(h[batch_edges[:, 0]], h[batch_edges[:, 1]])
-        loss = F.binary_cross_entropy(out.squeeze(-1), batch_labels.float())
+        loss = F.binary_cross_entropy_with_logits(out.squeeze(-1), batch_labels.float())
         
         loss.backward()
         optimizer.step()
