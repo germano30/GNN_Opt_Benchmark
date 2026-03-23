@@ -13,9 +13,9 @@ hyperparameters:
 
 targets:
   datasets:
-    - Cora
+    - WormNet
   models:
-    - GCN
+    - WordNet18RR
   optimizers:
     - AdamW
     - SOAP

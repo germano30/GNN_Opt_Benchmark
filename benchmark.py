@@ -589,9 +589,10 @@ def run_experiment(dataset_name, model_name, optimizer_name, seed=42, epochs=10,
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, required=True, choices=DATASETS.keys())
-    parser.add_argument('--model', type=str, required=True)
-    parser.add_argument('--optimizer', type=str, required=True, choices=OPTIMIZERS + ['all'])
+    parser.add_argument('--config', type=str, default=None, help='Caminho para o arquivo YAML de configuracao')
+    parser.add_argument('--dataset', type=str, default='Cora', choices=list(DATASETS.keys()) + [None])
+    parser.add_argument('--model', type=str, default='GCN')
+    parser.add_argument('--optimizer', type=str, default='AdamW', choices=OPTIMIZERS + ['all', None])
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--batch_size', type=int, default=1024)
