@@ -11,7 +11,8 @@ def train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, g
     x = data.x.to(device)
     edge_index = data.edge_index.to(device)
     if graph_type == 'heterogeneous':
-        edge_type = data.edge_attr.to(device)
+        edge_type = getattr(data, 'edge_type', getattr(data, 'edge_attr', None))
+        if edge_type is not None: edge_type = edge_type.to(device)
     else:
         edge_type = None
     
@@ -62,7 +63,8 @@ def eval_link_prediction(gnn, predictor, data, split_edge, evaluator, device, gr
     x = data.x.to(device)
     edge_index = data.edge_index.to(device)
     if graph_type == 'heterogeneous':
-        edge_type = data.edge_attr.to(device)
+        edge_type = getattr(data, 'edge_type', getattr(data, 'edge_attr', None))
+        if edge_type is not None: edge_type = edge_type.to(device)
         h = gnn(x, edge_index, edge_type)
     else:
         h = gnn(x, edge_index)
@@ -93,7 +95,8 @@ def train_node_classification(gnn, predictor, data, split_idx, optimizer, device
     y = data.y.to(device)
     
     if graph_type == 'heterogeneous':
-        edge_type = data.edge_attr.to(device)
+        edge_type = getattr(data, 'edge_type', getattr(data, 'edge_attr', None))
+        if edge_type is not None: edge_type = edge_type.to(device)
     else:
         edge_type = None
         
@@ -137,7 +140,8 @@ def eval_node_classification(gnn, predictor, data, split_idx, evaluator, device,
     y = data.y.to(device)
     
     if graph_type == 'heterogeneous':
-        edge_type = data.edge_attr.to(device)
+        edge_type = getattr(data, 'edge_type', getattr(data, 'edge_attr', None))
+        if edge_type is not None: edge_type = edge_type.to(device)
         h = gnn(x, edge_index, edge_type)
     else:
         h = gnn(x, edge_index)
@@ -176,7 +180,9 @@ def train_graph_classification(gnn, predictor, dataset, split_idx, optimizer, de
         batch = batch.to(device)
         
         if graph_type == 'heterogeneous':
-            h = gnn(batch.x, batch.edge_index, batch.edge_attr)
+            b_edge_t = getattr(batch, 'edge_type', getattr(batch, 'edge_attr', None))
+            if b_edge_t is not None: b_edge_t = b_edge_t.to(device)
+            h = gnn(batch.x, batch.edge_index, b_edge_t)
         else:
             h = gnn(batch.x, batch.edge_index)
             

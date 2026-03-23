@@ -236,46 +236,27 @@ MODELS_HETERO = ['RGCN', 'RGAT']
 OPTIMIZERS = ['AdamW', 'SGD', 'Muon','Shampoo','SOAP']
 
 def load_dataset(name):
-    if name == 'Cora':
-        dataset = Planetoid(root='/tmp/Cora', name='Cora')
-        data = dataset[0]
-        split_idx = {'train': data.train_mask, 'valid': data.val_mask, 'test': data.test_mask}
-        evaluator = None
-        return data, split_idx, evaluator, 'node'
-    elif DATASETS[name]['type'] == 'link':
-        if name == 'WordNet18RR':
-            dataset = WordNet18RR(root='dataset/WordNet18RR')
-            data = dataset[0]
-            val_edge_index = data.edge_index[:, data.val_mask]
-            test_edge_index = data.edge_index[:, data.test_mask]
-            
-            val_neg_edge_index = negative_sampling(val_edge_index, num_nodes=data.num_nodes, num_neg_samples=val_edge_index.size(1))
-            test_neg_edge_index = negative_sampling(test_edge_index, num_nodes=data.num_nodes, num_neg_samples=test_edge_index.size(1))
-            
-            split_idx = {
-                'train': {'edge': data.edge_index[:, data.train_mask].t()},
-                'valid': {'edge': val_edge_index.t(), 'edge_neg': val_neg_edge_index.t()},
-                'test': {'edge': test_edge_index.t(), 'edge_neg': test_neg_edge_index.t()}
-            }
-            evaluator = WordNet18RREvaluator()
-            return data, split_idx, evaluator, 'link'
-        else:
-            dataset = PygLinkPropPredDataset(name=name)
-            evaluator = LinkEvaluator(name=name)
-            data = dataset[0]
-            split_idx = dataset.get_edge_split()
-            return data, split_idx, evaluator, 'link'
-    elif DATASETS[name]['type'] == 'node':
-        dataset = PygNodePropPredDataset(name=name)
-        evaluator = NodeEvaluator(name=name)
-        data = dataset[0]
-        split_idx = dataset.get_idx_split()
-        return data, split_idx, evaluator, 'node'
-    elif DATASETS[name]['type'] == 'graph':
-        dataset = PygGraphPropPredDataset(name=name)
+    import os
+    import torch
+    path = f'dataset/processed_{name}.pt'
+    if not os.path.exists(path):
+        raise RuntimeError(f"Dataset {name} not prepared. Please run `python prepare_datasets.py --dataset {name}` first.")
+    
+    data, split_idx, task = torch.load(path, weights_only=False)
+    
+    if name == 'WordNet18RR':
+        evaluator = WordNet18RREvaluator()
+    elif task == 'link':
+        from ogb.linkproppred import Evaluator as LinkEvaluator
+        evaluator = LinkEvaluator(name=name)
+    elif task == 'node':
+        from ogb.nodeproppred import Evaluator as NodeEvaluator
+        evaluator = NodeEvaluator(name=name) if name != 'Cora' else None
+    elif task == 'graph':
+        from ogb.graphproppred import Evaluator as GraphEvaluator
         evaluator = GraphEvaluator(name=name)
-        split_idx = dataset.get_idx_split()
-        return dataset, split_idx, evaluator, 'graph'
+        
+    return data, split_idx, evaluator, task
 
 def get_model(name, in_channels, hidden_channels, out_channels, num_layers, dropout, graph_type, num_relations=None):
     if graph_type == 'homogeneous':
@@ -298,7 +279,8 @@ def train_link_prediction(gnn, predictor, data, split_edge, optimizer, device, g
     x = data.x.to(device)
     edge_index = data.edge_index.to(device)
     if graph_type == 'heterogeneous':
-        edge_type = data.edge_attr.to(device)
+        edge_type = getattr(data, 'edge_type', getattr(data, 'edge_attr', None))
+        if edge_type is not None: edge_type = edge_type.to(device)
     else:
         edge_type = None
     
@@ -348,7 +330,8 @@ def eval_link_prediction(gnn, predictor, data, split_edge, evaluator, device, gr
     x = data.x.to(device)
     edge_index = data.edge_index.to(device)
     if graph_type == 'heterogeneous':
-        edge_type = data.edge_attr.to(device)
+        edge_type = getattr(data, 'edge_type', getattr(data, 'edge_attr', None))
+        if edge_type is not None: edge_type = edge_type.to(device)
         h = gnn(x, edge_index, edge_type)
     else:
         h = gnn(x, edge_index)
@@ -378,7 +361,8 @@ def train_node_classification(gnn, predictor, data, split_idx, optimizer, device
     y = data.y.to(device)
     
     if graph_type == 'heterogeneous':
-        edge_type = data.edge_attr.to(device)
+        edge_type = getattr(data, 'edge_type', getattr(data, 'edge_attr', None))
+        if edge_type is not None: edge_type = edge_type.to(device)
     else:
         edge_type = None
         
@@ -421,7 +405,8 @@ def eval_node_classification(gnn, predictor, data, split_idx, evaluator, device,
     y = data.y.to(device)
     
     if graph_type == 'heterogeneous':
-        edge_type = data.edge_attr.to(device)
+        edge_type = getattr(data, 'edge_type', getattr(data, 'edge_attr', None))
+        if edge_type is not None: edge_type = edge_type.to(device)
         h = gnn(x, edge_index, edge_type)
     else:
         h = gnn(x, edge_index)
@@ -460,7 +445,9 @@ def train_graph_classification(gnn, predictor, dataset, split_idx, optimizer, de
         batch = batch.to(device)
         
         if graph_type == 'heterogeneous':
-            h = gnn(batch.x, batch.edge_index, batch.edge_attr)
+            b_edge_t = getattr(batch, 'edge_type', getattr(batch, 'edge_attr', None))
+            if b_edge_t is not None: b_edge_t = b_edge_t.to(device)
+            h = gnn(batch.x, batch.edge_index, b_edge_t)
         else:
             h = gnn(batch.x, batch.edge_index)
             
@@ -530,7 +517,8 @@ def run_experiment(dataset_name, model_name, optimizer_name, seed=42, epochs=10,
     
     if task == 'link':
         data, split_edge, evaluator, _ = data_info
-        num_relations = data.edge_attr.max().item() + 1 if hasattr(data, 'edge_attr') and data.edge_attr is not None else 1
+        edge_t = getattr(data, 'edge_type', getattr(data, 'edge_attr', None))
+        num_relations = edge_t.max().item() + 1 if edge_t is not None else 1
         if hasattr(data, 'x') and data.x is not None:
             in_channels = data.x.size(1)
         else:
@@ -544,7 +532,8 @@ def run_experiment(dataset_name, model_name, optimizer_name, seed=42, epochs=10,
         named_params = list(gnn.named_parameters()) + list(predictor.named_parameters())
     elif task == 'node':
         data, split_idx, evaluator, _ = data_info
-        num_relations = data.edge_attr.max().item() + 1 if hasattr(data, 'edge_attr') and data.edge_attr is not None else 1
+        edge_t = getattr(data, 'edge_type', getattr(data, 'edge_attr', None))
+        num_relations = edge_t.max().item() + 1 if edge_t is not None else 1
         if hasattr(data, 'x') and data.x is not None:
             in_channels = data.x.size(1)
         else:

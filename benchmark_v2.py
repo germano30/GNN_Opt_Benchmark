@@ -77,7 +77,8 @@ def run_experiment(dataset_name, model_name, optimizer_name, seed=42, epochs=10,
     
     if task == 'link':
         data, split_edge, evaluator, _ = data_info
-        num_relations = data.edge_attr.max().item() + 1 if hasattr(data, 'edge_attr') and data.edge_attr is not None else 1
+        edge_t = getattr(data, 'edge_type', getattr(data, 'edge_attr', None))
+        num_relations = edge_t.max().item() + 1 if edge_t is not None else 1
         
         # O TRUQUE DO GNNDELETE
         if hasattr(data, 'x') and data.x is not None:
@@ -94,7 +95,8 @@ def run_experiment(dataset_name, model_name, optimizer_name, seed=42, epochs=10,
 
     elif task == 'node':
         data, split_idx, evaluator, _ = data_info
-        num_relations = data.edge_attr.max().item() + 1 if hasattr(data, 'edge_attr') and data.edge_attr is not None else 1
+        edge_t = getattr(data, 'edge_type', getattr(data, 'edge_attr', None))
+        num_relations = edge_t.max().item() + 1 if edge_t is not None else 1
         
         # O TRUQUE DO GNNDELETE
         if hasattr(data, 'x') and data.x is not None:
@@ -130,7 +132,7 @@ def run_experiment(dataset_name, model_name, optimizer_name, seed=42, epochs=10,
     
     # WRAP O MODELO: Blindagem e Injecao Automatica do PyTorch Embedding
     if use_node_embedding:
-        print(f"\n[AVISO] Aplicando o GNNDelete Wrapper Trick ao dataset cru: '{dataset_name}'!\n")
+        pass
         num_nodes = data.num_nodes if hasattr(data, 'num_nodes') else 100000 # Fallback para graph tasks
         gnn = NodeEmbeddingWrapper(gnn, num_nodes, hidden_channels)
 
