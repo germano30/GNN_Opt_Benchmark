@@ -54,10 +54,7 @@ def train_link_prediction(gnn, predictor, data, split_edge,
 
     # Embeddings
     x = data.x.to(device)
-    if graph_type == 'heterogeneous' and edge_type is not None:
-        h = gnn(x, edge_index, edge_type.to(device))
-    else:
-        h = gnn(x, edge_index)
+    
 
     # Arestas positivas de treino
     pos_edge = split_edge['train']['edge'].to(device)   # [E, 2]
@@ -65,6 +62,11 @@ def train_link_prediction(gnn, predictor, data, split_edge,
     total_loss = total_examples = 0
     for perm in torch.randperm(pos_edge.size(0)).split(batch_size):
         optimizer.zero_grad()
+        
+        if graph_type == 'heterogeneous' and edge_type is not None:
+            h = gnn(x, edge_index, edge_type.to(device))
+        else:
+            h = gnn(x, edge_index)
 
         pos_src = pos_edge[perm, 0]
         pos_dst = pos_edge[perm, 1]
