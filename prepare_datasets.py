@@ -1,6 +1,13 @@
 import argparse
 import os
 import torch
+
+_original_load = torch.load
+def _custom_load(*args, **kwargs):
+    kwargs.setdefault('weights_only', False)
+    return _original_load(*args, **kwargs)
+torch.load = _custom_load
+
 from torch_geometric.datasets import Planetoid, WordNet18RR
 from ogb.linkproppred import PygLinkPropPredDataset
 from ogb.nodeproppred import PygNodePropPredDataset
