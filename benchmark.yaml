@@ -13,9 +13,11 @@ hyperparameters:
 
 targets:
   datasets:
-    - WormNet
-  models:
     - WordNet18RR
+  models:
+    - GIN_batch
+    - GIN_layer
+    - GIN_none
   optimizers:
     - AdamW
     - SOAP

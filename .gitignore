@@ -1,3 +1,4 @@
 dataset/*
 /vmuon*
 __pycache__
+*.png

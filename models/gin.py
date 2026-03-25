@@ -4,18 +4,20 @@ import torch.nn.functional as F
 from torch_geometric.nn import GINConv
 
 class GIN(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, num_layers, dropout):
+    def __init__(self, in_channels, hidden_channels, out_channels, num_layers, dropout, norm='batch'):
         super(GIN, self).__init__()
         self.convs = torch.nn.ModuleList()
         self.dropout = dropout
 
         def make_mlp(in_ch, out_ch):
-            return nn.Sequential(
-                nn.Linear(in_ch, out_ch),
-                nn.BatchNorm1d(out_ch),
-                nn.ReLU(),
-                nn.Linear(out_ch, out_ch),
-            )
+            layers = [nn.Linear(in_ch, out_ch)]
+            if norm == 'batch':
+                layers.append(nn.BatchNorm1d(out_ch))
+            elif norm == 'layer':
+                layers.append(nn.LayerNorm(out_ch))
+            layers.append(nn.ReLU())
+            layers.append(nn.Linear(out_ch, out_ch))
+            return nn.Sequential(*layers)
 
         # First layer
         self.convs.append(GINConv(make_mlp(in_channels, hidden_channels)))

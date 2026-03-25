@@ -138,7 +138,7 @@ DATASETS = {
     'ogbl-biokg':     {'type': 'link',  'graph_type': 'heterogeneous'},
 }
 
-MODELS_HOMO   = ['GCN', 'GAT', 'GIN']
+MODELS_HOMO   = ['GCN', 'GAT', 'GIN', 'GIN_batch', 'GIN_layer', 'GIN_none']
 MODELS_HETERO = ['RGCN', 'RGAT']
 OPTIMIZERS    = ['AdamW', 'SGD', 'Muon', 'Shampoo', 'SOAP']
 

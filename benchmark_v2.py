@@ -76,9 +76,12 @@ def set_seed(seed: int):
 def get_model(name, in_channels, hidden_channels, out_channels,
               num_layers, dropout, graph_type, num_relations=None):
     if graph_type == 'homogeneous':
-        if name == 'GCN':  return GCN(in_channels, hidden_channels, out_channels, num_layers, dropout)
-        if name == 'GAT':  return GAT(in_channels, hidden_channels, out_channels, num_layers, dropout)
-        if name == 'GIN':  return GIN(in_channels, hidden_channels, out_channels, num_layers, dropout)
+        if name == 'GCN':       return GCN(in_channels, hidden_channels, out_channels, num_layers, dropout)
+        if name == 'GAT':       return GAT(in_channels, hidden_channels, out_channels, num_layers, dropout)
+        if name == 'GIN':       return GIN(in_channels, hidden_channels, out_channels, num_layers, dropout)
+        if name == 'GIN_batch': return GIN(in_channels, hidden_channels, out_channels, num_layers, dropout, norm='batch')
+        if name == 'GIN_layer': return GIN(in_channels, hidden_channels, out_channels, num_layers, dropout, norm='layer')
+        if name == 'GIN_none':  return GIN(in_channels, hidden_channels, out_channels, num_layers, dropout, norm=None)
     else:
         if name == 'RGCN': return RGCN(in_channels, hidden_channels, out_channels, num_layers, dropout, num_relations)
         if name == 'RGAT': return RGAT(in_channels, hidden_channels, out_channels, num_layers, dropout, num_relations)
