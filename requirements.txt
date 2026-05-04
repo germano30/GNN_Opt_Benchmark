@@ -1,0 +1,13 @@
+# Passo 1 - PyTorch via conda:
+# conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia -y
+
+# Passo 2 - torch-scatter e torch-sparse (wheels pré-compilados, rodar antes do pip install):
+# pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.5.1+cu121.html
+
+# Passo 3 - pip install -r requirements.txt
+torch-geometric
+ogb
+muon
+torch-optimizer
+scikit-learn
+matplotlib

@@ -135,7 +135,6 @@ DATASETS = {
     'ogbg-ppa':       {'type': 'graph', 'graph_type': 'homogeneous'},
     'Cora':           {'type': 'node',  'graph_type': 'homogeneous'},
     'WordNet18RR':    {'type': 'link',  'graph_type': 'heterogeneous'},
-    'ogbl-biokg':     {'type': 'link',  'graph_type': 'heterogeneous'},
 }
 
 MODELS_HOMO   = ['GCN', 'GAT', 'GIN', 'GIN_batch', 'GIN_layer', 'GIN_none']

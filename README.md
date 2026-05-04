@@ -1,124 +1,167 @@
-# GNN Optimizer Benchmark
+# Which is the best Optimizer for your Graph Neural Network?
 
-Benchmark experimental para avaliar o impacto de diferentes **otimizadores de treinamento** em **Graph Neural Networks (GNNs)**.  
+While research has focused on improving Graph Neural Network (GNN) architectures, little work has evaluated the impact of optimization algorithms on GNN training. This paper presents a comprehensive evaluation study and practical guidelines for choosing the optimization methods for GNNs problems. We evaluate the performance of SGD, AdamW, Shampoo, SOAP, and Muon across link prediction, node classification and graph classification tasks in both homogeneous and heterogeneous graphs. The evaluated architectures were GCN, GAT, GIN, RGCN, and RGAT.
+## Overview
 
-O foco principal do projeto é analisar o desempenho do novo otimizador **Muon** em comparação com otimizadores tradicionais amplamente utilizados em treinamento de redes neurais.
+| Dimension | Coverage |
+|---|---|
+| **Optimizers** | AdamW, SGD, Shampoo, SOAP, Muon |
+| **Architectures** | GCN, GAT, GIN (+ BatchNorm / LayerNorm / no norm), RGCN, RGAT |
+| **Tasks** | Node classification, Link prediction, Graph classification |
+| **Datasets** | Cora, ogbn-proteins, ogbl-collab, ogbg-ppa, WordNet18RR |
 
-O benchmark inclui múltiplas **arquiteturas de GNN**, **tarefas de aprendizado em grafos** e **datasets padrão da literatura**.
+## Requirements
 
----
+**Step 1 — PyTorch (via conda, CUDA 12.1):**
+```bash
+conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia -y
+```
 
-# Objetivo
+**Step 2 — Sparse extensions (pre-compiled wheels):**
+```bash
+pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.5.1+cu121.html
+```
 
-O objetivo deste projeto é investigar como diferentes **otimizadores influenciam o treinamento de Graph Neural Networks**.
+**Step 3 — Remaining dependencies:**
+```bash
+pip install -r requirements.txt
+```
 
-Apesar de muitos trabalhos focarem em novas arquiteturas, poucos exploram sistematicamente o impacto de **otimização em GNNs**.
+> A CUDA-capable GPU is required. The benchmark will raise an error if no GPU is available.
 
-Este projeto busca responder perguntas como:
+## Project Structure
 
-- O **Muon** melhora a convergência em GNNs?
-- Existe diferença de comportamento entre **GNNs homogêneas e heterogêneas**?
-- Alguns otimizadores funcionam melhor para **tarefas específicas em grafos**?
-- O custo computacional de otimizadores avançados compensa o ganho de performance?
+```
+GNN_Muon/
+├── benchmark_v2.py        # Main experiment runner
+├── prepare_datasets.py    # Dataset download and preprocessing
+├── benchmark.yaml         # Default experiment configuration
+├── requirements.txt
+├── models/
+│   ├── gcn.py             # Graph Convolutional Network
+│   ├── gat.py             # Graph Attention Network
+│   ├── gin.py             # Graph Isomorphism Network (with norm variants)
+│   ├── rgcn.py            # Relational GCN (heterogeneous graphs)
+│   └── rgat.py            # Relational GAT (heterogeneous graphs)
+└── utils/
+    ├── data.py            # Dataset catalog and loaders
+    ├── training.py        # Training and evaluation loops
+    ├── optimizers.py      # Optimizer factory
+    ├── predictors.py      # Task-specific prediction heads
+    ├── wrappers.py        # Node embedding wrapper for feature-less graphs
+    └── soap.py            # SOAP optimizer implementation
+```
 
----
+## Preparing Datasets
 
-# Arquiteturas de GNN
+Download and preprocess all datasets before running experiments:
 
-Serão avaliadas arquiteturas representativas da literatura.
+```bash
+python prepare_datasets.py --dataset all
+```
 
-## Grafos Homogêneos
+Or prepare a single dataset:
 
-- **GCN (Graph Convolutional Network)**
-- **GAT (Graph Attention Network)**
-- **GIN (Graph Isomorphism Network)**
+```bash
+python prepare_datasets.py --dataset Cora
+python prepare_datasets.py --dataset ogbl-collab
+python prepare_datasets.py --dataset ogbn-proteins
+python prepare_datasets.py --dataset ogbg-ppa
+python prepare_datasets.py --dataset WordNet18RR
+```
 
-Essas arquiteturas utilizam mecanismos de **message passing**, onde cada nó atualiza sua representação agregando informações dos vizinhos. :contentReference[oaicite:0]{index=0}  
+Processed files are saved to `dataset/processed_<name>.pt`.
 
-- **GCN** realiza agregação usando a matriz de adjacência normalizada.
-- **GAT** introduz mecanismos de atenção para ponderar a importância dos vizinhos.
-- **GIN** possui forte poder discriminativo baseado no teste de Weisfeiler–Lehman. :contentReference[oaicite:1]{index=1}  
+## Running Experiments
 
-Referência:  
-https://arxiv.org/pdf/2302.13406
+### Via YAML config (recommended)
 
----
+```bash
+python benchmark_v2.py --config benchmark.yaml
+```
 
-## Grafos Heterogêneos
+The YAML file controls all hyperparameters, target datasets, models, and optimizers. Key fields:
 
-- **R-GCN (Relational Graph Convolutional Network)**
-- **R-GAT (Relational Graph Attention Network)**
+```yaml
+experiment:
+  runs: 5
+  epochs: 200
+  batch_size: 1024
+  patience: 30        # early stopping patience
 
-Essas arquiteturas são projetadas para grafos com **múltiplos tipos de relações**, como knowledge graphs.
+hyperparameters:
+  lr: 0.001
+  weight_decay: 0.01
+  hidden_channels: 256
+  num_layers: 3
+  dropout: 0.5
+  grad_accum_steps: 1
+  num_neighbors: [15, 10, 5]
 
-Referência:  
-https://arxiv.org/pdf/2302.13406
+targets:
+  datasets: [Cora, ogbl-collab, ogbn-proteins, ogbg-ppa, WordNet18RR]
+  models: [GCN, GAT, GIN_layer, RGCN, RGAT]
+  optimizers: [AdamW, SGD, Muon, Shampoo, SOAP]
+```
 
----
+### Via command line
 
-# Tarefas Avaliadas
+```bash
+# Run a single combination
+python benchmark_v2.py --dataset Cora --model GCN --optimizer AdamW --epochs 200 --runs 5
 
-O benchmark inclui três tarefas clássicas em aprendizado em grafos:
+# Run all optimizers on a given dataset/model
+python benchmark_v2.py --dataset ogbl-collab --model GIN_layer --optimizer all --runs 5
+```
 
-### Node Classification
-Predição de rótulos associados a nós individuais do grafo.
+### CLI arguments
 
-Exemplo:
-- classificação de papers em redes de citações.
+| Argument | Default | Description |
+|---|---|---|
+| `--config` | — | Path to YAML config (overrides other args) |
+| `--dataset` | `Cora` | Dataset name |
+| `--model` | `GCN` | Model architecture |
+| `--optimizer` | `AdamW` | Optimizer name, or `all` |
+| `--epochs` | `10` | Number of training epochs |
+| `--lr` | `0.01` | Learning rate |
+| `--batch_size` | `1024` | Mini-batch size |
+| `--runs` | `1` | Number of independent runs (mean ± std reported) |
 
----
+## Datasets
 
-### Link Prediction
-Predição da existência de uma aresta entre dois nós.
+| Dataset | Task | Graph type | Metric |
+|---|---|---|---|
+| Cora | Node classification | Homogeneous | Accuracy |
+| ogbn-proteins | Node classification | Homogeneous | ROC-AUC |
+| ogbl-collab | Link prediction | Homogeneous | Hits@50 |
+| ogbg-ppa | Graph classification | Homogeneous | Accuracy |
+| WordNet18RR | Link prediction | Heterogeneous (KG) | MRR |
 
-Aplicações:
-- recomendação
-- knowledge graphs
-- redes sociais
+## Optimizers
 
----
+| Optimizer | Description |
+|---|---|
+| **AdamW** | Adaptive first-order baseline with decoupled weight decay |
+| **SGD** | Stochastic gradient descent with momentum |
+| **Shampoo** | Approximate second-order with Kronecker-factored preconditioner |
+| **SOAP** | Preconditioned Adam with Shampoo-like eigenbasis updates |
+| **Muon** | Newton-Schulz orthogonalisation applied to 2-D weight gradients; 1-D parameters and embeddings fall back to AdamW |
 
-### Graph Classification
+> **Note on Muon:** embedding parameters (any parameter whose name contains `embed`) are automatically excluded from the Newton-Schulz update and handled by the internal AdamW sub-group. This is required for knowledge-graph datasets (WordNet18RR) and any model using a `NodeEmbeddingWrapper`.
 
-Classificação de grafos inteiros.
+## Output
 
-Aplicações:
-- química computacional
-- bioinformática
-- detecção de fraudes
+Each experiment run creates a timestamped results directory:
 
----
+```
+results_YYYYMMDD_HHMMSS/
+└── comparativo_v2_<dataset>_<model>.png
+```
 
-# Datasets
+Each PNG shows two panels:
+- **Left:** Training loss per epoch (mean ± std across runs)
+- **Right:** Validation metric per epoch, with final test score annotated
 
-Os experimentos serão conduzidos nos seguintes datasets:
+## Reproducibility
 
-| Dataset | Tipo | Tarefa Principal |
-|-------|------|------|
-| ogbl-collab | grafo de colaboração | link prediction |
-| ogbn-proteins | grafo de proteínas | node classification |
-| ogbg-ppa | grafo de proteínas | graph classification |
-| Cora | rede de citações | node classification |
-| WordNet18RR | knowledge graph | link prediction |
-| OGB-BioKG | knowledge graph biológico | link prediction |
-
----
-
-# Otimizadores Avaliados
-
-O foco principal do benchmark é comparar:
-
-| Otimizador | Tipo |
-|------|------|
-| AdamW | adaptativo |
-| SGD | gradiente estocástico |
-| Shampoo | segunda ordem aproximada |
-| SOAP | otimização adaptativa |
-| Muon | otimização baseada em matrizes |
-
-Referência do Muon:  
-https://kellerjordan.github.io/posts/muon/
-
-Observação:
-
-- O otimizador **Shampoo** será testado com diferentes frequências de atualização: freq = [10, 32]
+Each independent run is seeded separately before weight initialisation, ensuring that runs within the same experiment start from different weight configurations while remaining fully reproducible across repeated executions.

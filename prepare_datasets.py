@@ -55,7 +55,6 @@ def prepare_dataset(name):
                 },
             }
             task = 'link'
-
         else:
             dataset = PygLinkPropPredDataset(name=name, root='dataset')
             data = dataset[0]

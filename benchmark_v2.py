@@ -84,7 +84,7 @@ def get_model(name, in_channels, hidden_channels, out_channels,
         if name == 'GIN_none':  return GIN(in_channels, hidden_channels, out_channels, num_layers, dropout, norm=None)
     else:
         if name == 'RGCN': return RGCN(in_channels, hidden_channels, out_channels, num_layers, dropout, num_relations)
-        if name == 'RGAT': return RGAT(in_channels, hidden_channels, out_channels, num_layers, dropout, num_relations)
+        if name == 'RGAT': return RGAT(in_channels, hidden_channels, out_channels, num_layers, dropout, num_relations, num_bases=4)
     raise ValueError(f"Unknown model '{name}' for graph_type '{graph_type}'")
 
 
@@ -92,31 +92,47 @@ def get_model(name, in_channels, hidden_channels, out_channels,
 # Single experiment
 # ---------------------------------------------------------------------------
 
-def run_experiment(dataset_name, model_name, optimizer_name,
-                   seed=42, epochs=10, lr=0.01,
+def run_experiment(dataset_name, model_name, optimizer_name, seed=42, epochs=10, lr=0.01,
                    weight_decay=None, patience=None,
-                   hidden_channels=256, num_layers=3, dropout=0.5,
-                   batch_size=1024):
-
-    # -----------------------------------------------------------------------
-    # FIX: set_seed AQUI, no início de cada run individual.
-    # Isso garante que cada run tenha inicialização de pesos verdadeiramente
-    # diferente (seed 42, 43, 44 ...) e que os resultados sejam comparáveis
-    # mas não artificialmente correlacionados.
-    # -----------------------------------------------------------------------
-    set_seed(seed)
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                   hidden_channels=256, num_layers=3, dropout=0.5, batch_size=1024,
+                   grad_accum_steps=1, num_neighbors=None):
+    set_seed(seed) # Garante que todo otimizador inicie com os MESMOS pesos sorteados por rodada
+    # Force GPU (no CPU fallback) - entire computation on CUDA
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA not available! This script requires GPU. Install CUDA or check nvidia-smi.")
+    device = torch.device('cuda:0')
+    torch.cuda.set_device(device)
 
     data_info  = load_dataset(dataset_name)
     task       = DATASETS[dataset_name]['type']
     graph_type = DATASETS[dataset_name]['graph_type']
+
+    # Move dataset to GPU immediately after loading
+    if task == 'link' or task == 'node':
+        data = data_info[0]
+        if hasattr(data, 'x') and data.x is not None:
+            data.x = data.x.to(device)
+        if hasattr(data, 'edge_index'):
+            data.edge_index = data.edge_index.to(device)
+        if hasattr(data, 'y') and data.y is not None:
+            data.y = data.y.to(device)
+        if hasattr(data, 'edge_type') and data.edge_type is not None:
+            data.edge_type = data.edge_type.to(device)
+        elif hasattr(data, 'edge_attr') and data.edge_attr is not None:
+            data.edge_attr = data.edge_attr.to(device)
 
     # -----------------------------------------------------------------------
     # Construção do modelo por tipo de tarefa
     # -----------------------------------------------------------------------
     if task == 'link':
         data, split_edge, evaluator, _ = data_info
+        # Move split_edge to GPU
+        if isinstance(split_edge, dict):
+            for split_name in split_edge:
+                if isinstance(split_edge[split_name], dict):
+                    for key in split_edge[split_name]:
+                        if isinstance(split_edge[split_name][key], torch.Tensor):
+                            split_edge[split_name][key] = split_edge[split_name][key].to(device)
         edge_t       = getattr(data, 'edge_type', getattr(data, 'edge_attr', None))
         num_relations = edge_t.max().item() + 1 if edge_t is not None else 1
 
@@ -124,8 +140,9 @@ def run_experiment(dataset_name, model_name, optimizer_name,
             in_channels       = data.x.size(1)
             use_node_embedding = False
         else:
-            in_channels       = hidden_channels
-            data.x            = torch.arange(data.num_nodes, dtype=torch.long)
+            in_channels = hidden_channels
+            num_nodes = data.num_nodes if data.num_nodes is not None else sum(data.num_nodes_dict.values())
+            data.x = torch.arange(num_nodes, dtype=torch.long)
             use_node_embedding = True
 
         out_channels = hidden_channels
@@ -136,6 +153,11 @@ def run_experiment(dataset_name, model_name, optimizer_name,
 
     elif task == 'node':
         data, split_idx, evaluator, _ = data_info
+        # Move split_idx to GPU
+        if isinstance(split_idx, dict):
+            for split_name in split_idx:
+                if isinstance(split_idx[split_name], torch.Tensor):
+                    split_idx[split_name] = split_idx[split_name].to(device)
         edge_t        = getattr(data, 'edge_type', getattr(data, 'edge_attr', None))
         num_relations  = edge_t.max().item() + 1 if edge_t is not None else 1
 
@@ -146,16 +168,36 @@ def run_experiment(dataset_name, model_name, optimizer_name,
             in_channels        = hidden_channels
             data.x             = torch.arange(data.num_nodes, dtype=torch.long)
             use_node_embedding = True
-
-        out_channels  = hidden_channels
-        gnn           = get_model(model_name, in_channels, hidden_channels,
-                                  out_channels, num_layers, dropout,
-                                  graph_type, num_relations)
-        num_classes   = data.y.max().item() + 1 if dataset_name != 'Cora' else 7
-        predictor     = NodePredictor(hidden_channels, num_classes, 2, dropout)
+            
+        out_channels = hidden_channels
+        gnn = get_model(model_name, in_channels, hidden_channels, out_channels, num_layers, dropout, graph_type, num_relations)
+        if data.y.dim() > 1 and data.y.shape[-1] > 1:
+            num_classes = data.y.shape[-1]  # multi-label (e.g. ogbn-proteins: 112)
+        elif dataset_name == 'Cora':
+            num_classes = 7
+        else:
+            num_classes = data.y.max().item() + 1
+        predictor = NodePredictor(hidden_channels, num_classes, 2, dropout)
 
     else:  # graph
         dataset, split_idx, evaluator, _ = data_info
+        
+        # Move dataset samples to GPU
+        for i in range(len(dataset)):
+            if hasattr(dataset[i], 'x') and dataset[i].x is not None:
+                dataset[i].x = dataset[i].x.to(device)
+            if hasattr(dataset[i], 'edge_index'):
+                dataset[i].edge_index = dataset[i].edge_index.to(device)
+            if hasattr(dataset[i], 'y'):
+                dataset[i].y = dataset[i].y.to(device)
+            if hasattr(dataset[i], 'edge_attr') and dataset[i].edge_attr is not None:
+                dataset[i].edge_attr = dataset[i].edge_attr.to(device)
+        
+        # Move split_idx to GPU
+        if isinstance(split_idx, dict):
+            for split_name in split_idx:
+                if isinstance(split_idx[split_name], torch.Tensor):
+                    split_idx[split_name] = split_idx[split_name].to(device)
 
         if hasattr(dataset, 'num_node_features') and dataset.num_node_features > 0:
             in_channels        = dataset.num_node_features
@@ -178,9 +220,12 @@ def run_experiment(dataset_name, model_name, optimizer_name,
     # Node embedding wrapper (para datasets sem features contínuas)
     # -----------------------------------------------------------------------
     if use_node_embedding:
-        num_nodes = (data.num_nodes
-                     if hasattr(data, 'num_nodes')
-                     else 100_000)
+        if task == 'graph':
+            num_nodes = 100_000
+        else:
+            num_nodes = (data.num_nodes
+                         if hasattr(data, 'num_nodes')
+                         else 100_000)
         gnn = NodeEmbeddingWrapper(gnn, num_nodes, hidden_channels)
 
     gnn.to(device)
@@ -203,27 +248,19 @@ def run_experiment(dataset_name, model_name, optimizer_name,
         if task == 'link':
             loss          = train_link_prediction(
                                 gnn, predictor, data, split_edge,
-                                optimizer, device, graph_type, batch_size)
+                                optimizer, device, graph_type, batch_size, grad_accum_steps,
+                                num_neighbors=num_neighbors)
             score, m_name = eval_link_prediction(
                                 gnn, predictor, data, split_edge,
-                                evaluator, device, graph_type)
+                                evaluator, device, graph_type, split='valid')
 
         elif task == 'node':
-            loss          = train_node_classification(
-                                gnn, predictor, data, split_idx,
-                                optimizer, device, graph_type, batch_size)
-            score, m_name = eval_node_classification(
-                                gnn, predictor, data, split_idx,
-                                evaluator, device, graph_type)
-
-        else:
-            loss          = train_graph_classification(
-                                gnn, predictor, dataset, split_idx,
-                                optimizer, device, graph_type, batch_size=32)
-            score, m_name = eval_graph_classification(
-                                gnn, predictor, dataset, split_idx,
-                                evaluator, device, graph_type, batch_size=32)
-
+            loss = train_node_classification(gnn, predictor, data, split_idx, optimizer, device, graph_type, batch_size, grad_accum_steps, num_neighbors=num_neighbors)
+            score, m_name = eval_node_classification(gnn, predictor, data, split_idx, evaluator, device, graph_type)
+        elif task == 'graph':
+            loss = train_graph_classification(gnn, predictor, dataset, split_idx, optimizer, device, graph_type, 32, grad_accum_steps)
+            score, m_name = eval_graph_classification(gnn, predictor, dataset, split_idx, evaluator, device, graph_type, batch_size=32)
+            
         train_losses.append(loss)
         eval_scores.append(score)
         metric_name = m_name
@@ -235,17 +272,26 @@ def run_experiment(dataset_name, model_name, optimizer_name,
             epochs_no_improve += 1
 
         print(f'Epoch {epoch+1:03d}/{epochs}: '
-              f'Train Loss {loss:.4f} | Val/Test {metric_name}: {score:.4f}')
+              f'Train Loss {loss:.4f} | Valid {metric_name}: {score:.4f}')
 
         if patience is not None and epochs_no_improve >= patience:
             print(f"Early stopping at epoch {epoch+1}!")
-            rem = epochs - (epoch + 1)
-            train_losses.extend([loss]  * rem)
-            eval_scores.extend([score] * rem)
             break
 
+    # Final evaluation on test split
+    if task == 'link':
+        final_test_score, _ = eval_link_prediction(
+            gnn, predictor, data, split_edge, evaluator, device, graph_type, split='test')
+    else:
+        final_test_score = best_score  # node/graph já usa test no eval
+
     training_time = time.time() - start_time
-    return best_score, training_time, train_losses, eval_scores, metric_name
+    
+    # Limpar GPU memory para próxima run
+    del gnn, predictor, optimizer
+    torch.cuda.empty_cache()
+    
+    return final_test_score, training_time, train_losses, eval_scores, metric_name
 
 
 # ---------------------------------------------------------------------------
@@ -270,23 +316,25 @@ if __name__ == '__main__':
         import yaml
         with open(args.config, 'r') as f:
             cfg = yaml.safe_load(f)
+            
+        runs_cfg = cfg.get('experiment', {}).get('runs', args.runs)
+        epochs_cfg = cfg.get('experiment', {}).get('epochs', args.epochs)
+        batch_size_cfg = cfg.get('experiment', {}).get('batch_size', args.batch_size)
+        patience_cfg = cfg.get('experiment', {}).get('patience', None)
+        
+        lr_cfg = cfg.get('hyperparameters', {}).get('lr', args.lr)
+        weight_decay_cfg = cfg.get('hyperparameters', {}).get('weight_decay', None)
+        hidden_channels_cfg = cfg.get('hyperparameters', {}).get('hidden_channels', 256)
+        num_layers_cfg = cfg.get('hyperparameters', {}).get('num_layers', 3)
+        dropout_cfg = cfg.get('hyperparameters', {}).get('dropout', 0.5) or 0.5
+        grad_accum_steps_cfg = cfg.get('hyperparameters', {}).get('grad_accum_steps', 1)
+        num_neighbors_cfg = cfg.get('hyperparameters', {}).get('num_neighbors', None)
+        if isinstance(num_neighbors_cfg, int):
+            num_neighbors_cfg = [num_neighbors_cfg]
 
-        exp  = cfg.get('experiment',    {})
-        hyp  = cfg.get('hyperparameters', {})
-        tgt  = cfg.get('targets',       {})
-
-        runs_cfg          = exp.get('runs',       args.runs)
-        epochs_cfg        = exp.get('epochs',     args.epochs)
-        batch_size_cfg    = exp.get('batch_size', args.batch_size)
-        patience_cfg      = exp.get('patience',   None)
-        lr_cfg            = hyp.get('lr',              args.lr)
-        weight_decay_cfg  = hyp.get('weight_decay',    None)
-        hidden_channels_cfg = hyp.get('hidden_channels', 256)
-        num_layers_cfg    = hyp.get('num_layers',      3)
-        dropout_cfg       = hyp.get('dropout',         0.5)
-        datasets_list     = tgt.get('datasets',   [args.dataset])
-        models_list       = tgt.get('models',     [args.model])
-        optimizers_list   = tgt.get('optimizers', [args.optimizer])
+        datasets_list = cfg.get('targets', {}).get('datasets', [args.dataset])
+        models_list = cfg.get('targets', {}).get('models', [args.model])
+        optimizers_list = cfg.get('targets', {}).get('optimizers', [args.optimizer])
         if 'all' in optimizers_list:
             optimizers_list = OPTIMIZERS
     else:
@@ -297,13 +345,24 @@ if __name__ == '__main__':
         patience_cfg       = None
         weight_decay_cfg   = None
         hidden_channels_cfg = 256
-        num_layers_cfg     = 3
-        dropout_cfg        = 0.5
-        datasets_list      = [args.dataset]
-        models_list        = [args.model]
-        optimizers_list    = OPTIMIZERS if args.optimizer == 'all' else [args.optimizer]
+        num_layers_cfg = 3
+        dropout_cfg = 0.5
+        grad_accum_steps_cfg = 1
+        num_neighbors_cfg = None
 
-    # Main grid-search loop
+        datasets_list = [args.dataset]
+        models_list = [args.model]
+        optimizers_list = OPTIMIZERS if args.optimizer == 'all' else [args.optimizer]
+
+    import os
+    from datetime import datetime
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir = f"results_{timestamp}"
+    os.makedirs(results_dir, exist_ok=True)
+    print(f"\nOs graficos dessa execucao serao salvos em: {results_dir}\n")
+
+    # Main Grid-Search Loop
     for dataset in datasets_list:
         if dataset not in DATASETS:
             print(f"Dataset inválido: {dataset}. Pulando...")
@@ -323,37 +382,45 @@ if __name__ == '__main__':
                       f"com modelo {model} ({runs_cfg} runs)...")
 
                 opt_final_scores = []
-                opt_losses       = []
-                opt_scores       = []
-                time_takens      = []
-
+                opt_losses = []
+                opt_scores = []
+                time_takens = []
+                
+                
                 try:
                     for run_idx in range(runs_cfg):
-                        # Cada run usa uma seed diferente → inicialização
-                        # de pesos distinta → variância real entre runs
+                        print(f'---- Run ({run_idx + 1}/{runs_cfg})')
                         seed = 42 + run_idx
                         final_score, time_taken, losses, scores, metric_name = run_experiment(
                             dataset, model, opt, seed, epochs_cfg, lr_cfg,
-                            weight_decay_cfg, patience_cfg,
-                            hidden_channels_cfg, num_layers_cfg,
-                            dropout_cfg, batch_size_cfg,
+                            weight_decay_cfg, patience_cfg, hidden_channels_cfg, num_layers_cfg, dropout_cfg, batch_size_cfg,
+                            grad_accum_steps_cfg, num_neighbors_cfg
                         )
                         opt_final_scores.append(final_score)
                         opt_losses.append(losses)
                         opt_scores.append(scores)
                         time_takens.append(time_taken)
+                        
+                        # Extra GPU cleanup between runs
+                        if run_idx < runs_cfg - 1:
+                            import gc
+                            gc.collect()
 
                     mean_final_score = np.mean(opt_final_scores)
                     std_final_score  = np.std(opt_final_scores)
                     mean_time        = np.mean(time_takens)
 
-                    print(f"> [{opt}] Tempo médio: {mean_time:.2f}s | "
-                          f"Final {metric_name}: "
-                          f"{mean_final_score:.4f} ± {std_final_score:.4f}")
+                    if runs_cfg > 1:
+                        print(f"> [{opt}] Tempo médio: {mean_time:.2f}s | "
+                              f"Final {metric_name}: "
+                              f"{mean_final_score:.4f} ± {std_final_score:.4f}")
+                    else:
+                        print(f"> [{opt}] Tempo: {mean_time:.2f}s | "
+                              f"Final Test {metric_name}: {mean_final_score:.4f}")
 
                     results[opt] = {
-                        'losses':            np.array(opt_losses),
-                        'scores':            np.array(opt_scores),
+                        'losses':            opt_losses,   # list of lists (may differ in length)
+                        'scores':            opt_scores,
                         'mean_final_score':  mean_final_score,
                         'std_final_score':   std_final_score,
                         'time':              mean_time,
@@ -370,46 +437,64 @@ if __name__ == '__main__':
 
                 plt.figure(figsize=(12, 5))
 
+                # --- Loss plot ---
                 plt.subplot(1, 2, 1)
                 for opt, hist in results.items():
-                    mean_loss  = hist['losses'].mean(axis=0)
-                    std_loss   = hist['losses'].std(axis=0)
-                    ep_range   = range(1, epochs_cfg + 1)
-                    line, = plt.plot(ep_range, mean_loss, label=opt)
                     if runs_cfg > 1:
+                        # Pad to max length for mean/std across runs
+                        max_len = max(len(l) for l in hist['losses'])
+                        padded = np.array([l + [l[-1]]*(max_len - len(l)) for l in hist['losses']])
+                        mean_loss = padded.mean(axis=0)
+                        std_loss  = padded.std(axis=0)
+                        ep_range  = range(1, max_len + 1)
+                        line, = plt.plot(ep_range, mean_loss, label=opt)
                         plt.fill_between(ep_range,
                                          mean_loss - std_loss,
                                          mean_loss + std_loss,
                                          alpha=0.2, color=line.get_color())
+                    else:
+                        losses = hist['losses'][0]
+                        ep_range = range(1, len(losses) + 1)
+                        plt.plot(ep_range, losses, label=opt)
                 plt.title(f'Train Loss ({dataset} / {model})')
-                plt.xlabel('Época')
+                plt.xlabel('Epoch')
                 plt.ylabel('Loss')
                 plt.legend()
                 plt.grid(True, alpha=0.3)
 
+                # --- Score plot ---
                 plt.subplot(1, 2, 2)
                 metric = list(results.values())[0]['metric_name']
                 for opt, hist in results.items():
-                    mean_score = hist['scores'].mean(axis=0)
-                    std_score  = hist['scores'].std(axis=0)
-                    ep_range   = range(1, epochs_cfg + 1)
-                    label = (f"{opt} "
-                             f"({metric} final="
-                             f"{hist['mean_final_score']:.3f}"
-                             f"±{hist['std_final_score']:.3f})")
-                    line, = plt.plot(ep_range, mean_score, label=label)
                     if runs_cfg > 1:
+                        max_len = max(len(s) for s in hist['scores'])
+                        padded = np.array([s + [s[-1]]*(max_len - len(s)) for s in hist['scores']])
+                        mean_score = padded.mean(axis=0)
+                        std_score  = padded.std(axis=0)
+                        ep_range   = range(1, max_len + 1)
+                        label = (f"{opt} "
+                                 f"({metric}="
+                                 f"{hist['mean_final_score']:.3f}"
+                                 f"±{hist['std_final_score']:.3f})")
+                        line, = plt.plot(ep_range, mean_score, label=label)
                         plt.fill_between(ep_range,
                                          mean_score - std_score,
                                          mean_score + std_score,
                                          alpha=0.2, color=line.get_color())
-                plt.title(f'Val/Test {metric} ({dataset} / {model})')
-                plt.xlabel('Época')
+                    else:
+                        scores = hist['scores'][0]
+                        ep_range = range(1, len(scores) + 1)
+                        label = (f"{opt} "
+                                 f"(test {metric}={hist['mean_final_score']:.4f}, "
+                                 f"{hist['time']:.1f}s)")
+                        plt.plot(ep_range, scores, label=label)
+                plt.title(f'Valid {metric} ({dataset} / {model})')
+                plt.xlabel('Epoch')
                 plt.ylabel(metric)
                 plt.legend()
                 plt.grid(True, alpha=0.3)
 
                 plt.tight_layout()
-                plot_path = f"comparativo_v2_{dataset}_{model}.png"
+                plot_path = os.path.join(results_dir, f"comparativo_v2_{dataset}_{model}.png")
                 plt.savefig(plot_path)
                 print(f"\nGráfico salvo em: {plot_path}")
