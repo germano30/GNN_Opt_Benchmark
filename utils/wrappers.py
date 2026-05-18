@@ -25,10 +25,11 @@ class NodeEmbeddingWrapper(nn.Module):
         if x is None or x.dtype == torch.long or not x.is_floating_point():
             # For graph classification datasets, x might be None — use index range
             if x is None:
-                # Assume this is a graph batch; we need sequential node indices
-                # This is a fallback; ideally graphs should pre-index nodes
+                # Graph classification (inductive): no persistent node IDs.
+                # All nodes get the same embedding so structure drives differentiation,
+                # not batch position. (Link/node tasks pre-set x=arange before this call.)
                 num_nodes = args[0].max().item() + 1 if len(args) > 0 and hasattr(args[0], 'max') else 100
-                x = torch.arange(num_nodes, dtype=torch.long, device=self.node_emb.weight.device)
+                x = torch.zeros(num_nodes, dtype=torch.long, device=self.node_emb.weight.device)
             x = self.node_emb(x)
             if hasattr(x, 'squeeze'):
                 x = x.squeeze() # Ensures [num_nodes, emb_dim] layout

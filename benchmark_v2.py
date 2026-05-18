@@ -358,7 +358,7 @@ if __name__ == '__main__':
     from datetime import datetime
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = f"results_{timestamp}"
+    results_dir = f"results_20260504_110603"
     os.makedirs(results_dir, exist_ok=True)
     print(f"\nOs graficos dessa execucao serao salvos em: {results_dir}\n")
 
@@ -484,9 +484,7 @@ if __name__ == '__main__':
                     else:
                         scores = hist['scores'][0]
                         ep_range = range(1, len(scores) + 1)
-                        label = (f"{opt} "
-                                 f"(test {metric}={hist['mean_final_score']:.4f}, "
-                                 f"{hist['time']:.1f}s)")
+                        label = f"{opt} (test {metric}={hist['mean_final_score']:.4f})"
                         plt.plot(ep_range, scores, label=label)
                 plt.title(f'Valid {metric} ({dataset} / {model})')
                 plt.xlabel('Epoch')
@@ -495,6 +493,20 @@ if __name__ == '__main__':
                 plt.grid(True, alpha=0.3)
 
                 plt.tight_layout()
-                plot_path = os.path.join(results_dir, f"comparativo_v2_{dataset}_{model}.png")
-                plt.savefig(plot_path)
-                print(f"\nGráfico salvo em: {plot_path}")
+                base_path = os.path.join(results_dir, f"comparativo_v2_{dataset}_{model}")
+                plt.savefig(base_path + ".png")
+                plt.savefig(base_path + ".svg")
+                plt.close()
+                print(f"\nGráfico salvo em: {base_path}.png / .svg")
+
+                # Save per-epoch results to CSV for later plot regeneration
+                import csv
+                csv_path = base_path + ".csv"
+                with open(csv_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['optimizer', 'run', 'epoch', 'train_loss', 'val_score', 'metric'])
+                    for opt, hist in results.items():
+                        for run_i, (losses, scores) in enumerate(zip(hist['losses'], hist['scores'])):
+                            for ep_i, (loss, score) in enumerate(zip(losses, scores)):
+                                writer.writerow([opt, run_i + 1, ep_i + 1, loss, score, hist['metric_name']])
+                print(f"Resultados salvos em: {csv_path}")
