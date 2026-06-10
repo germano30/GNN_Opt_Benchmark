@@ -17,9 +17,6 @@ targets:
   datasets:
     - ogbg-ppa
   models:
-    - GCN
-    - GAT
-    - GIN_none
     - GIN_layer
     - GIN_batch 
   optimizers:
